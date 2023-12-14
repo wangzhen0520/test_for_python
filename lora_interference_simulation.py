@@ -1,14 +1,42 @@
 import serial
 import serial.tools.list_ports
 import threading
-import queue, time
+import queue, time, json
+import logging
+from datetime import datetime
 
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+
+format_option = logging.Formatter('%(asctime)s.%(msecs)03d|%(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+filename = f'AutoTest_{now}.log'
+
+# 创建控制台处理器
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(format_option)
+
+# 创建文件处理器
+file_handler = logging.FileHandler(filename)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(format_option)
+
+# 将处理器添加到logger对象中
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
 
 class SerialCommunication:
     def __init__(self):
         self.serial_port = self.select_serial_port()
         self.baud_rate = 115200
-        self.ser = serial.Serial(self.serial_port, self.baud_rate)
+        self.ser = None
+        try:
+            self.ser = serial.Serial(self.serial_port, self.baud_rate)
+        except serial.serialutil.SerialException:
+            logging.error("PermissionError: Please check the permission of the serial port.")
+            return None
         self.recv_queue = queue.Queue()
 
     def get_available_ports(self):
@@ -22,12 +50,12 @@ class SerialCommunication:
     def print_available_ports(self):
         ports = self.get_available_ports()
         if ports:
-            print("Available ports:")
-            print("%-10s %-10s %-50s" % ("num", "number", "name"))
+            logging.info("PermissionError: Please check the permission of the serial port.")
+            logging.info("%-10s %-10s %-50s", "num", "number", "name")
             for port in ports:
-                print("%-10s %-10s %-50s" % (port[0], port[1], port[2]))
+                logging.info("%-10s %-10s %-50s", port[0], port[1], port[2])
         else:
-            print("No available ports found.")
+            logging.warning("No available ports found.")
 
     def select_serial_port(self):
         self.print_available_ports()
@@ -39,10 +67,10 @@ class SerialCommunication:
             ports = self.get_available_ports()
             for port in ports:
                 if str(port[0]) == selected_port:
-                    print("Selected port: %s" % port[1])
+                    logging.info("Selected port: %s" % port[1])
                     return port[1]
 
-            print("Invalid serial port. Please try again.")
+            logging.warning("Invalid serial port. Please try again.")
 
     def crc16(self, data: bytes) -> int:
         # 初始化crc为0xFFFF
@@ -71,18 +99,17 @@ class SerialCommunication:
             
             received_data = self.ser.read(cnt)
             if received_data[0] == 0xff:
-                # print(received_data.hex())
                 hex_str = ""
                 recv_hex_str = received_data.hex()
                 for i in range(0, len(recv_hex_str), 2):
                     hex_str += recv_hex_str[i:i+2].upper() + " "
-                print("recv: [%d] %s" % (len(hex_str) / 3, hex_str))
+                logging.info("recv: [%d] %s", len(hex_str) / 3, hex_str)
 
                 # crc 校验
                 crc = self.crc16(received_data[0:cnt - 2]).to_bytes(2, 'little')
                 if not (crc[0] == received_data[cnt - 2]
                         and crc[1] == received_data[cnt - 1]):
-                    print("crc check fail")
+                    logging.warning("crc check fail")
                     break
 
                 self.recv_queue.put(received_data)
@@ -97,10 +124,10 @@ class SerialCommunication:
                 hex_str = self.recv_queue.get(timeout=5)
                 # 获取当前信道
                 if (hex_str[2] == 0x02) and (hex_str[3] == 0x00):
-                    print("get freq: %d" % hex_str[4])
+                    logging.info("get freq: %d", hex_str[4])
                     self.freq = hex_str[4]
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
 
     def set_lora_freq(self, freq):
@@ -117,11 +144,11 @@ class SerialCommunication:
                 hex_str = self.recv_queue.get(timeout=5)
                 # 扫描信道设置结果
                 if (hex_str[1] == 0x10) and (hex_str[2] == 0x00) and (hex_str[3] == 0xD3):
-                    print("set freq success: %s" % freq)
+                    logging.info("set freq success: %s", freq)
                 else:
-                    print("set freq failed: %s" % freq)
+                    logging.info("set freq failed: %s", freq)
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
 
     def get_lora_netwk_id(self):
@@ -132,9 +159,9 @@ class SerialCommunication:
                 # 获取网络标识
                 if (hex_str[2] == 0x04) and (hex_str[3] == 0x00):
                     self.netwk_id = hex_str[5] << 8 | hex_str[6]
-                    print("get netwk_id: %d" % self.netwk_id)
+                    logging.info("get netwk_id: %d", self.netwk_id)
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
 
     def set_lora_netwk_id(self, net_id):
@@ -145,7 +172,6 @@ class SerialCommunication:
         crc = self.crc16(data_byte).to_bytes(2, byteorder='little')
         data += hex(crc[0])[2:].upper().zfill(2) + " "
         data += hex(crc[1])[2:].upper().zfill(2)
-        # print(data)
         self.send_byte_data(data)
 
         while True:
@@ -153,11 +179,46 @@ class SerialCommunication:
                 hex_str = self.recv_queue.get(timeout=5)
                 # 网络标识设置结果
                 if (hex_str[1] == 0x10) and (hex_str[2] == 0x00) and (hex_str[3] == 0xD8):
-                    print("set netwk_id success: %s" % net_id)
+                    logging.info("set netwk_id success: %s", net_id)
                 else:
-                    print("set netwk_id failed: %s" % net_id)
+                    logging.error("set netwk_id failed: %s", net_id)
             except:
-                print("timeout")
+                logging.warning("timeout")
+            break
+
+    def get_lora_interference_duration(self):
+        self.send_byte_data("FF 03 ED 2A 00 01 85 70 ")
+        while True:
+            try:
+                hex_str = self.recv_queue.get(timeout=5)
+                # 获取干扰评估时长
+                if (hex_str[1] == 0x03) and (hex_str[2] == 0x02):
+                    self.interf_dura = hex_str[3] << 8 | hex_str[4]
+                    logging.info("get interf_dura: %d", self.interf_dura)
+            except:
+                logging.warning("timeout")
+            break
+
+    def set_lora_interference_duration(self, duration):
+        hex_str = hex(int(duration))[2:].zfill(4)
+        duration_str = str(hex_str).upper()
+        data = "FF 10 ED 2A 00 01 02 " + duration_str[0:2] + " " + duration_str[2:4] + " "
+        data_byte = bytearray.fromhex(data)
+        crc = self.crc16(data_byte).to_bytes(2, byteorder='little')
+        data += hex(crc[0])[2:].upper().zfill(2) + " "
+        data += hex(crc[1])[2:].upper().zfill(2)
+        self.send_byte_data(data)
+
+        while True:
+            try:
+                hex_str = self.recv_queue.get(timeout=5)
+                # 设置干扰评估时长
+                if (hex_str[1] == 0x10) and (hex_str[2] == 0xED) and (hex_str[3] == 0x2A):
+                    logging.info("set interf_dura success: %s", duration)
+                else:
+                    logging.error("set interf_dura failed: %s", duration)
+            except:
+                logging.warning("timeout")
             break
 
     def get_lora_netwk_addr(self):
@@ -168,9 +229,9 @@ class SerialCommunication:
                 # 获取网络地址
                 if (hex_str[1] == 0x03) and (hex_str[2] == 0x04):                    
                     self.netwk_addr = hex_str[3] << 24 | hex_str[4] << 16 | hex_str[5] << 8 | hex_str[6]
-                    print("get netwk_addr: %d" % self.netwk_addr)
+                    logging.info("get netwk_addr: %d", self.netwk_addr)
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
 
     def set_lora_netwk_addr(self, addr):
@@ -181,18 +242,17 @@ class SerialCommunication:
         crc = self.crc16(data_byte).to_bytes(2, byteorder='little')
         data += hex(crc[0])[2:].upper().zfill(2) + " "
         data += hex(crc[1])[2:].upper().zfill(2)
-        # print(data)
 
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
                 # 网络标识设置结果
                 if (hex_str[1] == 0x10) and (hex_str[2] == 0xEB) and (hex_str[3] == 0x3C):
-                    print("set netwk_addr success: %s" % addr)
+                    logging.info("set netwk_addr success: %s", addr)
                 else:
-                    print("set netwk_addr failed: %s" % addr)
+                    logging.error("set netwk_addr failed: %s", addr)
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
 
     def get_lora_rf_speed(self):
@@ -202,10 +262,10 @@ class SerialCommunication:
                 hex_str = self.recv_queue.get(timeout=5)
                 # 获取无线速率
                 if (hex_str[2] == 0x02) and (hex_str[3] == 0x00):
-                    print("get rf speed id: %d" % hex_str[4])
+                    logging.info("get rf speed id: %d", hex_str[4])
                     self.rf_speed_id = hex_str[4]
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
 
     def get_lora_scan_channel(self):
@@ -215,10 +275,10 @@ class SerialCommunication:
                 hex_str = self.recv_queue.get(timeout=5)
                 # 获取扫描信道
                 if (hex_str[1] == 0x03) and (hex_str[2] == 0x0e):
-                    print("get start scan ch: %d" % hex_str[3])
+                    logging.info("get start scan ch: %d", hex_str[3])
                     self.start_freq = hex_str[3]
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
 
     def set_lora_scan_channel(self, ch):
@@ -235,11 +295,11 @@ class SerialCommunication:
                 hex_str = self.recv_queue.get(timeout=5)
                 # 扫描信道设置结果
                 if (hex_str[1] == 0x10) and (hex_str[2] == 0x01) and (hex_str[3] == 0xCD):
-                    print("set scan ch success: %s" % ch)
+                    logging.info("set scan ch success: %s", ch)
                 else:
-                    print("set scan ch failed: %s" % ch)
+                    logging.error("set scan ch failed: %s", ch)
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
 
     def lora_interference_simulation(self, addr):
@@ -250,8 +310,6 @@ class SerialCommunication:
         crc = self.crc16(data_byte).to_bytes(2, byteorder='little')
         data += hex(crc[0])[2:].upper().zfill(2) + " "
         data += hex(crc[1])[2:].upper().zfill(2)
-        # print(data)
-        # self.send_byte_data("FF 10 01 F4 00 03 06 C0 B9 C4 D0 00 00 40 07")
         self.send_byte_data(data)
 
         while True:
@@ -259,31 +317,30 @@ class SerialCommunication:
                 hex_str = self.recv_queue.get(timeout=5)
                 # 触发干扰命令
                 if (hex_str[1] == 0x10) and (hex_str[2] == 0x01):
-                    print("simulation success")
+                    logging.info("simulation success")
                 else:
-                    print("simulation fail or not support")
+                    logging.info("simulation fail or not support")
             except:
-                print("timeout")
+                logging.warning("timeout")
             break
         self.send_byte_data("FF 03 02 26 00 05 70 64")
 
     def send_str_data(self, data):
         self.ser.write((data + "\n").encode("utf-8"))
-        print(f"Sent: {data}")
+        logging.info(f"Sent: {data}")
 
     def send_byte_data(self, data):
         if len(data) == 0:
             return
-        print("send: [%d] %s" % ((len(data) + 1) / 3, data))
+        logging.info("send: [%d] %s", (len(data) + 1) / 3, data)
         write_len = self.ser.write(bytearray.fromhex(data))
-        # print("串口发出{}个字节".format(write_len))
 
     def start_serial_threads(self):
         receive_thread = threading.Thread(target=self.receive_data)
         receive_thread.daemon = True
         receive_thread.start()
 
-    def main(self):
+    def test(self):
         self.start_serial_threads()
 
         try:
@@ -317,10 +374,47 @@ class SerialCommunication:
             self.ser.close()
 
 
+class LocConfig:
+    def __init__(self):
+        self.interference_duration = 60 # 干扰评估时长
+        self.interference_num = 0 # 干扰次数, 0:一直干扰 >0:干扰多少次后结束
+        self.time_interval = 200 # 毫秒
+
+        try:
+            with open("config.json", 'r', encoding='UTF-8') as f:
+                buf = json.load(f)
+                self.interference_duration = buf.get('interference_duration')
+                self.time_interval = buf.get('interval')
+                self.interference_num = buf.get('interference_num')
+                logging.info("interference_duration: %d", self.interference_duration)
+                logging.info("interference_num: %d", self.interference_num)
+                logging.info("time_interval: %d", self.time_interval)
+        except FileNotFoundError:
+            logging.warning("config.json not found")
+            return None
+
+    def get_interference_duration(self):
+        return self.interference_duration
+    
+    def get_interference_num(self):
+        return self.interference_num
+
+    def get_time_interval(self):
+        return self.time_interval
+
+
 if __name__ == "__main__":
+    #读取当前配置, 读取不到使用默认配置
+    cfg = LocConfig()
+
     main_serial_cm = SerialCommunication()
-    # serial_communication.main()
+    if main_serial_cm.ser is None:
+        exit()
+    # serial_communication.test()
+
     sub_serial_cm = SerialCommunication()
+    if main_serial_cm.ser is None:
+        exit()
 
     main_serial_cm.start_serial_threads()
     sub_serial_cm.start_serial_threads()
@@ -329,14 +423,25 @@ if __name__ == "__main__":
         main_serial_cm.get_lora_freq()
         main_serial_cm.get_lora_netwk_id()
         main_serial_cm.get_lora_netwk_addr()
+        main_serial_cm.get_lora_interference_duration()
+        main_serial_cm.set_lora_interference_duration(cfg.get_interference_duration())
 
-        sub_serial_cm.set_lora_freq(main_serial_cm.freq)
+        sub_serial_cm.get_lora_freq()
         sub_serial_cm.set_lora_netwk_id(main_serial_cm.netwk_id - 1)
+        sub_serial_cm.set_lora_freq(main_serial_cm.freq)
 
+        start_time = time.time()
         while True:
-            sub_serial_cm.lora_interference_simulation(main_serial_cm.netwk_addr)
-            time.sleep(0.2)
+            if (time.time() - start_time) > 10:
+                main_serial_cm.get_lora_freq()
+                sub_serial_cm.get_lora_freq()
+                if (main_serial_cm.freq != sub_serial_cm.freq):
+                    sub_serial_cm.set_lora_freq(main_serial_cm.freq)
+                    time.sleep(20)
+                start_time = time.time()
 
+            sub_serial_cm.lora_interference_simulation(main_serial_cm.netwk_addr)
+            time.sleep(cfg.get_time_interval() / 1000.0)
     except KeyboardInterrupt:
         pass
     finally:
