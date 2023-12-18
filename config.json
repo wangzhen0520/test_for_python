@@ -1,5 +1,6 @@
 {
 	"interference_duration": 60,
 	"interference_num" : 0,
-	"interval"	: 200
+	"time_interval"	: 200,
+	"next_interference_interval": 60
 }

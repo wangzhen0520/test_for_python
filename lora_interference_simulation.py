@@ -50,7 +50,6 @@ class SerialCommunication:
     def print_available_ports(self):
         ports = self.get_available_ports()
         if ports:
-            logging.info("PermissionError: Please check the permission of the serial port.")
             logging.info("%-10s %-10s %-50s", "num", "number", "name")
             for port in ports:
                 logging.info("%-10s %-10s %-50s", port[0], port[1], port[2])
@@ -379,16 +378,19 @@ class LocConfig:
         self.interference_duration = 60 # 干扰评估时长
         self.interference_num = 0 # 干扰次数, 0:一直干扰 >0:干扰多少次后结束
         self.time_interval = 200 # 毫秒
+        self.next_interference_interval = 60 # 下次干扰触发间隔 秒
 
         try:
             with open("config.json", 'r', encoding='UTF-8') as f:
                 buf = json.load(f)
                 self.interference_duration = buf.get('interference_duration')
-                self.time_interval = buf.get('interval')
+                self.time_interval = buf.get('time_interval')
                 self.interference_num = buf.get('interference_num')
+                self.next_interference_interval = buf.get('next_interference_interval')
                 logging.info("interference_duration: %d", self.interference_duration)
                 logging.info("interference_num: %d", self.interference_num)
                 logging.info("time_interval: %d", self.time_interval)
+                logging.info("next_interference_interval: %d", self.next_interference_interval)
         except FileNotFoundError:
             logging.warning("config.json not found")
             return None
@@ -401,6 +403,9 @@ class LocConfig:
 
     def get_time_interval(self):
         return self.time_interval
+    
+    def get_next_interference_interval(self):
+        return self.next_interference_interval
 
 
 if __name__ == "__main__":
@@ -431,14 +436,23 @@ if __name__ == "__main__":
         sub_serial_cm.set_lora_freq(main_serial_cm.freq)
 
         start_time = time.time()
+        interference_start_time = start_time
+        interference_cnt = 0
         while True:
             if (time.time() - start_time) > 10:
                 main_serial_cm.get_lora_freq()
                 sub_serial_cm.get_lora_freq()
                 if (main_serial_cm.freq != sub_serial_cm.freq):
+                    interference_cnt += 1
+                    logging.info("interference cnt: %d cost: %ds", interference_cnt, time.time() - interference_start_time)
+                    if cfg.get_interference_num() > 0 and interference_cnt > cfg.get_interference_num():
+                        break
+
                     sub_serial_cm.set_lora_freq(main_serial_cm.freq)
-                    time.sleep(20)
+                    time.sleep(cfg.get_next_interference_interval())
+                    logging.info("next interference interval wait: %ds", cfg.get_next_interference_interval())
                 start_time = time.time()
+                interference_start_time = start_time
 
             sub_serial_cm.lora_interference_simulation(main_serial_cm.netwk_addr)
             time.sleep(cfg.get_time_interval() / 1000.0)
