@@ -421,6 +421,16 @@ if __name__ == "__main__":
     if main_serial_cm.ser is None:
         exit()
 
+    try:
+        while True:
+            data_to_send = input("Enter 'Y' to start (or 'N' to quit): ")
+            if data_to_send.lower() == "n":
+                exit()
+            elif data_to_send.lower() == "y":
+                break
+    except KeyboardInterrupt:
+        exit()
+
     main_serial_cm.start_serial_threads()
     sub_serial_cm.start_serial_threads()
 
