@@ -8,7 +8,7 @@ from datetime import datetime
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
-format_option = logging.Formatter('%(asctime)s.%(msecs)03d | %(levelname)s - %(funcName)s:%(lineno)d - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+format_option = logging.Formatter('%(asctime)s.%(msecs)03d | %(levelname)s - %(filename)s:%(lineno)d - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 filename = f'AutoTest_{now}.log'
