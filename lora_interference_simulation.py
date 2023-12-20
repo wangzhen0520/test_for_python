@@ -8,7 +8,7 @@ from datetime import datetime
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
-format_option = logging.Formatter('%(asctime)s.%(msecs)03d|%(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+format_option = logging.Formatter('%(asctime)s.%(msecs)03d | %(levelname)s - %(funcName)s:%(lineno)d - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 filename = f'AutoTest_{now}.log'
@@ -108,16 +108,18 @@ class SerialCommunication:
                 crc = self.crc16(received_data[0:cnt - 2]).to_bytes(2, 'little')
                 if not (crc[0] == received_data[cnt - 2]
                         and crc[1] == received_data[cnt - 1]):
-                    logging.warning("crc check fail")
+                    logging.error("crc check fail")
                     break
-
                 self.recv_queue.put(received_data)
             else:
                 pass
                 # print(received_data.decode())
 
     def get_lora_freq(self):
-        self.send_byte_data("FF 03 00 D3 00 01 60 2D")
+        data = "FF 03 00 D3 00 01 60 2D"
+        self.send_byte_data(data)
+
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -125,9 +127,18 @@ class SerialCommunication:
                 if (hex_str[2] == 0x02) and (hex_str[3] == 0x00):
                     logging.info("get freq: %d", hex_str[4])
                     self.freq = hex_str[4]
+                else:
+                    logging.error("get freq fail")
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
+            
 
     def set_lora_freq(self, freq):
         hex_str = hex(int(freq))[2:].zfill(2)
@@ -138,6 +149,7 @@ class SerialCommunication:
         data += hex(crc[1])[2:].upper().zfill(2)
         self.send_byte_data(data)
 
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -145,13 +157,22 @@ class SerialCommunication:
                 if (hex_str[1] == 0x10) and (hex_str[2] == 0x00) and (hex_str[3] == 0xD3):
                     logging.info("set freq success: %s", freq)
                 else:
-                    logging.info("set freq failed: %s", freq)
+                    logging.error("set freq failed: %s", freq)
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
     def get_lora_netwk_id(self):
-        self.send_byte_data("FF 03 00 D8 00 02 51 EE")
+        data = "FF 03 00 D8 00 02 51 EE"
+        self.send_byte_data(data)
+
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -159,9 +180,17 @@ class SerialCommunication:
                 if (hex_str[2] == 0x04) and (hex_str[3] == 0x00):
                     self.netwk_id = hex_str[5] << 8 | hex_str[6]
                     logging.info("get netwk_id: %d", self.netwk_id)
+                else:
+                    logging.error("set netwk_id fail")
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue    
 
     def set_lora_netwk_id(self, net_id):
         hex_str = hex(int(net_id))[2:].zfill(2)
@@ -173,6 +202,7 @@ class SerialCommunication:
         data += hex(crc[1])[2:].upper().zfill(2)
         self.send_byte_data(data)
 
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -181,12 +211,21 @@ class SerialCommunication:
                     logging.info("set netwk_id success: %s", net_id)
                 else:
                     logging.error("set netwk_id failed: %s", net_id)
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
     def get_lora_interference_duration(self):
-        self.send_byte_data("FF 03 ED 2A 00 01 85 70 ")
+        data = "FF 03 ED 2A 00 01 85 70"
+        self.send_byte_data(data)
+
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -194,9 +233,17 @@ class SerialCommunication:
                 if (hex_str[1] == 0x03) and (hex_str[2] == 0x02):
                     self.interf_dura = hex_str[3] << 8 | hex_str[4]
                     logging.info("get interf_dura: %d", self.interf_dura)
+                else:
+                    logging.error("get interf_dura fail")
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
     def set_lora_interference_duration(self, duration):
         hex_str = hex(int(duration))[2:].zfill(4)
@@ -208,6 +255,7 @@ class SerialCommunication:
         data += hex(crc[1])[2:].upper().zfill(2)
         self.send_byte_data(data)
 
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -216,12 +264,21 @@ class SerialCommunication:
                     logging.info("set interf_dura success: %s", duration)
                 else:
                     logging.error("set interf_dura failed: %s", duration)
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
     def get_lora_netwk_addr(self):
-        self.send_byte_data("FF 03 01 2D 00 02 40 20")
+        data = "FF 03 01 2D 00 02 40 20"
+        self.send_byte_data(data)
+
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -229,9 +286,17 @@ class SerialCommunication:
                 if (hex_str[1] == 0x03) and (hex_str[2] == 0x04):                    
                     self.netwk_addr = hex_str[3] << 24 | hex_str[4] << 16 | hex_str[5] << 8 | hex_str[6]
                     logging.info("get netwk_addr: %d", self.netwk_addr)
+                else:
+                    logging.error("get netwk_addr fail")
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
     def set_lora_netwk_addr(self, addr):
         hex_str = hex(int(addr))[2:].zfill(2)
@@ -242,6 +307,7 @@ class SerialCommunication:
         data += hex(crc[0])[2:].upper().zfill(2) + " "
         data += hex(crc[1])[2:].upper().zfill(2)
 
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -250,12 +316,21 @@ class SerialCommunication:
                     logging.info("set netwk_addr success: %s", addr)
                 else:
                     logging.error("set netwk_addr failed: %s", addr)
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
     def get_lora_rf_speed(self):
-        self.send_byte_data("FF 03 00 D4 00 01 D1 EC ")
+        data = "FF 03 00 D4 00 01 D1 EC"
+        self.send_byte_data(data)
+
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -263,12 +338,23 @@ class SerialCommunication:
                 if (hex_str[2] == 0x02) and (hex_str[3] == 0x00):
                     logging.info("get rf speed id: %d", hex_str[4])
                     self.rf_speed_id = hex_str[4]
+                else:
+                    logging.error("get rf speed failed")
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
     def get_lora_scan_channel(self):
-        self.send_byte_data("FF 03 01 CD 00 07 81 D5")
+        data = "FF 03 01 CD 00 07 81 D5"
+        self.send_byte_data(data)
+
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -276,9 +362,17 @@ class SerialCommunication:
                 if (hex_str[1] == 0x03) and (hex_str[2] == 0x0e):
                     logging.info("get start scan ch: %d", hex_str[3])
                     self.start_freq = hex_str[3]
+                else:
+                    logging.error("get start scan ch failed")
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
     def set_lora_scan_channel(self, ch):
         hex_str = hex(int(ch))[2:].zfill(2)
@@ -289,6 +383,7 @@ class SerialCommunication:
         data += hex(crc[1])[2:].upper().zfill(2)
         self.send_byte_data(data)
 
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
@@ -297,11 +392,17 @@ class SerialCommunication:
                     logging.info("set scan ch success: %s", ch)
                 else:
                     logging.error("set scan ch failed: %s", ch)
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
 
-    def lora_interference_simulation(self, addr):
+    def set_interference_addr(self, addr):
         hex_str = hex(int(addr))[2:].zfill(2)
         addr_str = str(hex_str).upper()
         data = "FF 10 01 F4 00 03 06 " + addr_str[0:2] + " " + addr_str[2:4] + " " + addr_str[4:6] + " " + addr_str[6:8] + " 00 00 "
@@ -309,20 +410,32 @@ class SerialCommunication:
         crc = self.crc16(data_byte).to_bytes(2, byteorder='little')
         data += hex(crc[0])[2:].upper().zfill(2) + " "
         data += hex(crc[1])[2:].upper().zfill(2)
+        # 设置干扰目的地址
         self.send_byte_data(data)
 
+        retry_cnt = 0
         while True:
             try:
                 hex_str = self.recv_queue.get(timeout=5)
-                # 触发干扰命令
+                # 设置干扰目的地址
                 if (hex_str[1] == 0x10) and (hex_str[2] == 0x01):
-                    logging.info("simulation success")
+                    logging.info("set interfer addr:%d success", addr)
                 else:
-                    logging.info("simulation fail or not support")
+                    logging.info("set interfer addr:%d fail or not support", addr)
+                break
             except:
                 logging.warning("timeout")
-            break
+                time.sleep(1)
+                self.send_byte_data(data)
+                retry_cnt += 1
+                if retry_cnt > 3:
+                    break
+                continue
+        
+    def lora_interference_simulation(self):
+        # 触发跳频指令
         self.send_byte_data("FF 03 02 26 00 05 70 64")
+        logging.info("simulation success")
 
     def send_str_data(self, data):
         self.ser.write((data + "\n").encode("utf-8"))
@@ -331,8 +444,12 @@ class SerialCommunication:
     def send_byte_data(self, data):
         if len(data) == 0:
             return
+        
+        queue_size = self.recv_queue.qsize()
+        if queue_size != 0:
+            logging.info("recv_queue size: %d", queue_size)
         logging.info("send: [%d] %s", (len(data) + 1) / 3, data)
-        write_len = self.ser.write(bytearray.fromhex(data))
+        self.ser.write(bytearray.fromhex(data))
 
     def start_serial_threads(self):
         receive_thread = threading.Thread(target=self.receive_data)
@@ -444,6 +561,7 @@ if __name__ == "__main__":
         sub_serial_cm.get_lora_freq()
         sub_serial_cm.set_lora_netwk_id(main_serial_cm.netwk_id - 1)
         sub_serial_cm.set_lora_freq(main_serial_cm.freq)
+        sub_serial_cm.set_interference_addr(main_serial_cm.netwk_addr)
 
         start_time = time.time()
         interference_start_time = start_time
@@ -458,13 +576,14 @@ if __name__ == "__main__":
                     if cfg.get_interference_num() > 0 and interference_cnt > cfg.get_interference_num():
                         break
 
-                    sub_serial_cm.set_lora_freq(main_serial_cm.freq)
+                    logging.info("next interference interval will wait: %ds", cfg.get_next_interference_interval())
                     time.sleep(cfg.get_next_interference_interval())
-                    logging.info("next interference interval wait: %ds", cfg.get_next_interference_interval())
+                    sub_serial_cm.set_lora_freq(main_serial_cm.freq)
+                    sub_serial_cm.set_interference_addr(main_serial_cm.netwk_addr)
                 start_time = time.time()
                 interference_start_time = start_time
 
-            sub_serial_cm.lora_interference_simulation(main_serial_cm.netwk_addr)
+            sub_serial_cm.lora_interference_simulation()
             time.sleep(cfg.get_time_interval() / 1000.0)
     except KeyboardInterrupt:
         pass
