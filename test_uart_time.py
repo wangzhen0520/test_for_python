@@ -27,17 +27,73 @@ console_handler.setFormatter(format_option)
 logger.addHandler(console_handler)
 # logger.addHandler(file_handler)
 
+# 定义队列类
+class MyQueue(object):
+    def __init__(self, size):
+        self.size = size  # 定义队列长度
+        self.queue = []  # 存储队列 列表
+
+    def __str__(self):
+        # 返回对象的字符串表达式，方便查看
+        return str(self.queue)
+
+    def inQueue(self, n):
+        # 入队
+        if self.isFull():
+            return -1
+        self.queue.append(n)  # 列表末尾添加新的对象
+
+    def outQueue(self):
+        # 出队
+        if self.isEmpty():
+            return -1
+        firstelement = self.queue[0]   # 删除队头元素
+        self.queue.remove(firstelement)  # 删除队操作
+        return firstelement
+
+    def delete(self, n):
+        # 删除某元素
+        element = self.queue[n]
+        self.queue.remove(element)
+
+    def inPut(self, n, m):
+        # 插入某元素 n代表列表当前的第n位元素 m代表传入的值
+        self.queue[n] = m
+
+    def getSize(self):
+        # 获取当前长度
+        return len(self.queue)
+
+    def getnumber(self, n):
+        # 获取某个元素
+        element = self.queue[n]
+        return element
+
+    def isEmpty(self):
+        # 判断是否为空
+        if len(self.queue) == 0:
+            return True
+        return False
+
+    def isFull(self):
+        # 判断队列是否满
+        if len(self.queue) == self.size:
+            return True
+        return False
+
+
 class SerialCommunication:
     def __init__(self):
         self.serial_port = self.select_serial_port()
         self.baud_rate = 9600
         self.ser = None
         try:
-            self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout = 0.2)
+            self.ser = serial.Serial(self.serial_port, self.baud_rate)
         except serial.serialutil.SerialException:
             logging.error("PermissionError: Please check the permission of the serial port.")
             return None
         self.recv_queue = queue.Queue()
+        self.recv_queue2 = MyQueue(1024)
 
     def get_available_ports(self):
         ports = serial.tools.list_ports.comports()
@@ -93,12 +149,34 @@ class SerialCommunication:
         while True:
             cnt = self.ser.in_waiting
             if cnt > 0:
-                received_data = self.ser.read(81)
+                received_data = self.ser.read_all()
+                # logging.info("cnt:%d %d", cnt, received_data[0])
+                if (received_data is None) or (len(received_data) == 0):
+                    continue
+                for i in range(0, len(received_data)):
+                    self.recv_queue2.inQueue(received_data[i])
+
+                if (self.recv_queue2.getSize() < 2):
+                    continue
+
+                while (self.recv_queue2.getSize() > 1 and self.recv_queue2.getnumber(0) != 0xf4 and self.recv_queue2.getnumber(1) != 0xf5):
+                    self.recv_queue2.outQueue()
+
+                if (self.recv_queue2.getSize() < 4):
+                    continue
+
+                f_size = (self.recv_queue2.getnumber(2) << 8 | self.recv_queue2.getnumber(3)) + 4
+                # logging.info("f_size: %d que:%d", f_size, self.recv_queue2.getSize())
                 hex_str = ""
-                recv_hex_str = received_data.hex()
-                for i in range(0, len(recv_hex_str), 2):
-                    hex_str += recv_hex_str[i:i+2].upper() + " "
-                logging.info("recv: [%d] %s", len(hex_str) / 3, hex_str)
+                if f_size > 0 and self.recv_queue2.getSize() >= f_size:
+                    while (f_size > 0):
+                        f_size -= 1
+                        hex_val = self.recv_queue2.outQueue()
+                        hex_str += hex(int(hex_val))[2:].zfill(2) + " "
+                        self.recv_queue.put(hex_val)
+
+                    logging.info("recv: [%d] %s", (len(hex_str) + 1) / 3, hex_str)
+                    logging.info("remain: [%d]", self.recv_queue2.getSize())
 
     def send_str_data(self, data):
         self.ser.write((data + "\n").encode("utf-8"))
@@ -112,7 +190,8 @@ class SerialCommunication:
         # queue_size = self.recv_queue.qsize()
         # if queue_size != 0:
         #     logging.info("recv_queue size: %d", queue_size)
-        # logging.info("send: [%d] %s", (len(data) + 1) / 3, data)
+
+        logging.info("send: [%d] %s", (len(data) + 1) / 3, data)
 
     def start_serial_threads(self):
         receive_thread = threading.Thread(target=self.receive_data)
@@ -121,30 +200,36 @@ class SerialCommunication:
 
 
     def test_send_recv(self):
-        # t1 = time.perf_counter_ns()
         data = "f4 f5 00 61 02 02 09 09 1C 25 01 00 03 00 00 00 F1 00 00 00 00 00 00 00 ff ff ff ff 01 00 0a 00 04 00 5f 00 01 01 00 00 09 5c 00 00 00 0a 00 0a 00 0a 00 0a 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ED 79"
         self.send_byte_data(data)
         self.send_cnt += 1
-        # t2 = time.perf_counter_ns()
-        # logging.info("send cost: %f", (t2 - t1) / 1000000)
 
-        received_data = self.ser.read(81)
-        self.recv_cnt += 1
-
-        # hex_str = ""
-        # recv_hex_str = received_data.hex()
-        # for i in range(0, len(recv_hex_str), 2):
-        #     hex_str += recv_hex_str[i:i+2].upper() + " "
-        # logging.info("recv: [%d] %s", len(hex_str) / 3, hex_str)
+        t1 = time.perf_counter_ns()
+        while True:
+            queue_size = self.recv_queue.qsize()
+            if queue_size < 81:
+                if time.perf_counter_ns() - t1 > 400000000:
+                    break
+                time.sleep(0.01)
+                continue
+            else:
+                while not self.recv_queue.empty():
+                    try:
+                        self.recv_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                self.recv_cnt+=1
+                break
+        logging.info("recv_queue size: %d", queue_size)
 
     def test(self):
-        # self.start_serial_threads()
+        self.start_serial_threads()
 
-        self.ser.set_buffer_size(rx_size=100,tx_size=100)
+        self.ser.set_buffer_size(rx_size=100,tx_size=120)
 
         self.send_cnt = 0
         self.recv_cnt = 0
-        log_cnt = 1
+        log_cnt = 0
         try:
             time1 = time.perf_counter_ns()
             while True:
@@ -156,7 +241,7 @@ class SerialCommunication:
                     logging.info("total cost: %f", (time_send_end - time_send_start) / 1000000)
 
                     if (log_cnt % 10 == 0):
-                        logging.info("send: %d, recv: %d", self.send_cnt, self.recv_cnt)
+                        logging.info("~~~~~~~ send: %d recv: %d ~~~~~~~~~~", self.send_cnt, self.recv_cnt)
                         log_cnt = 0
                     log_cnt += 1
 
