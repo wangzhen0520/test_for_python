@@ -9,6 +9,8 @@ import threading, time, queue, json
 class SerialCommunication:
     def __init__(self):
         self.recv_queue = queue.Queue()
+        self.ser_receive_flag = False
+        self.run_flag = False
 
     def get_available_ports(self):
         ports = serial.tools.list_ports.comports()
@@ -33,18 +35,21 @@ class SerialCommunication:
             return None
 
     def close_serial_port(self, ser):
-        self.run_flag = False
-        self.receive_thread.join()
         if self.recv_queue.empty() == False:
             self.recv_queue.get_nowait()
         ser.close()
 
     def send_str_data(self, ser, data):
+        if ser.isOpen() == False:
+            return
+
         ser.write((data + "\n").encode("utf-8"))
         print(f"Sent: {data}")
 
     def send_byte_data(self, ser, data):
         if len(data) == 0:
+            return
+        if ser.isOpen() == False:
             return
 
         print("send: [%d] %s" %((len(data) + 1) / 3, data))
@@ -71,6 +76,9 @@ class SerialCommunication:
     def receive_data(self):
         while self.run_flag:
             time.sleep(0.3)
+            if self.ser_receive_flag == False:
+                continue
+        
             try:
                 cnt = self.ser.in_waiting
                 if cnt <= 0:
@@ -110,10 +118,19 @@ class SerialCommunication:
 
     def start_serial_threads(self, ser):
         self.ser = ser
-        self.run_flag = True
-        self.receive_thread = threading.Thread(target=self.receive_data)
-        # receive_thread.daemon = True
-        self.receive_thread.start()
+        self.ser_receive_flag = True
+
+        if self.run_flag == False:
+            self.run_flag = True
+            self.receive_thread = threading.Thread(target=self.receive_data)
+            self.receive_thread.daemon = True
+            self.receive_thread.start()
+
+    def stop_serial_threads(self):
+        # self.run_flag = False
+        self.ser_receive_flag = False
+        # self.receive_thread.join()
+
 
 class MyFrame(wx.Frame):
     def __init__(self, *args, **kw):
@@ -206,6 +223,10 @@ class MyFrame(wx.Frame):
         print("当前选择：%s\n com2_name: %s" % (self.cb2.GetStringSelection(), self.com2_name))
 
         self.load_config()
+        self.cat1_ver = ""
+        self.csq = ""
+        self.task_run_flag = False
+        self.task_run = False
 
     def OnSelect1(self, e):
         str = e.GetString()
@@ -234,7 +255,10 @@ class MyFrame(wx.Frame):
             
             self.sc1.send_str_data(self.ser1, "AT+GSN=1\r\n")
             
-            data_str = self.sc1.recv_queue.get(timeout=1)
+            try:
+                data_str = self.sc1.recv_queue.get(timeout=1)
+            except queue.Empty:
+                return ""
 
             if data_str.find("+GSN:"):
                 data_str = data_str.split("\r\n")
@@ -247,9 +271,14 @@ class MyFrame(wx.Frame):
 
             if (result == "OK"):
                 print("imei %s" % imei)
-                imei = imei.split("+GSN:")[1]
-                print("get imei is {0}".format(imei))
-                return imei.strip()
+                if imei.find("+GSN:") != -1:
+                    imei = imei.split("+GSN:")
+                    if len(imei) > 1:
+                        imei = imei[1].strip()
+                    print("get imei is {0}".format(imei))
+                    return imei
+                else:
+                    return ""
             else:
                 print("get data is {0}".format(data_str))
                 return ""
@@ -261,8 +290,11 @@ class MyFrame(wx.Frame):
             
             self.sc1.send_str_data(self.ser1, "AT+ICCID\r\n")
             
-            data_str = self.sc1.recv_queue.get(timeout=1)
-            
+            try:
+                data_str = self.sc1.recv_queue.get(timeout=1)
+            except queue.Empty:
+                return ""
+
             if data_str.find("+ICCID:"):
                 data_str = data_str.split("\r\n")
                 if len(data_str) > 3:
@@ -288,15 +320,17 @@ class MyFrame(wx.Frame):
             data = "F4 F5 00 0A 02 03 09 00 00 00 00 00 E3 08"
             self.sc2.send_byte_data(self.ser2, data)
 
-            data_str = self.sc2.recv_queue.get(timeout=1)
-            print("get version is {0}".format(data_str))
+            try:
+                data_str = self.sc2.recv_queue.get(timeout=1)
+            except queue.Empty:
+                return ""
 
+            self.cat1_ver = ""
             if (data_str[0] == 0xF4 and data_str[1] == 0xF5):
                 try:
                     self.cat1_ver = data_str[8:23].decode('utf-8')
                 except Exception as e:
                     print("decode error is {0}".format(e))
-                    self.cat1_ver = ""
 
                 self.csq = data_str[24] - 256
 
@@ -306,6 +340,11 @@ class MyFrame(wx.Frame):
     def detect_task(self):
         cnt = 3
         while self.task_run:
+            if self.task_run_flag == False:
+                time.sleep(1)
+                cnt = 3
+                continue
+
             if cnt != 0:
                 # 查询IMEI号
                 imei = self.get_cat1_imei()
@@ -319,8 +358,7 @@ class MyFrame(wx.Frame):
                 self.get_cat1_version()
                 if self.cat1_ver:
                     self.label_sw_vertion_text.SetLabelText(self.cat1_ver)
-
-                self.label_csq_text.SetLabelText(str(self.csq) + " dBm")
+                    self.label_csq_text.SetLabelText(str(self.csq) + " dBm")
 
                 cnt -= 1
 
@@ -341,9 +379,16 @@ class MyFrame(wx.Frame):
 
         if self.button.GetLabelText() == "开始检测":
             self.button.SetLabelText("停止检测")
+            self.label_csq_text.SetLabelText("")
+            self.label_imei_text.SetLabelText("")
+            self.label_iccid_text.SetLabelText("")
+            self.label_sw_vertion_text.SetLabelText("")
+            self.label_result_text.SetLabelText("")
         else:
-            self.task_run = False
-            self.task_thread.join()
+            self.sc1.stop_serial_threads()
+            self.sc2.stop_serial_threads()
+            self.task_run_flag = False
+            # self.task_thread.join()
             self.button.SetLabelText("开始检测")
             self.sc1.close_serial_port(self.ser1)
             self.sc2.close_serial_port(self.ser2)
@@ -365,10 +410,12 @@ class MyFrame(wx.Frame):
         else:
             self.statusbar.SetStatusText(self.com2_name + " 连接失败", 1)
 
-        self.task_run = True
-        self.task_thread = threading.Thread(target=self.detect_task)
-        self.task_thread.start()
-
+        self.task_run_flag = True
+        if self.task_run == False:
+            self.task_run = True
+            self.task_thread = threading.Thread(target=self.detect_task)
+            self.task_thread.daemon = True
+            self.task_thread.start()
 
 def main():
     app = wx.App()
