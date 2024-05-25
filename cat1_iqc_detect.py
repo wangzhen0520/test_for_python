@@ -226,6 +226,9 @@ class MyFrame(wx.Frame):
             self.cb1.SetSelection(0)
             self.com1_name = self.cb1.GetStringSelection().split(' ')[0]
             self.statusbar.SetStatusText(self.com1_name + " 未连接", 0)
+        else:
+            self.statusbar.SetStatusText("串口1未识别, 请检查！", 0)
+
         self.cb1.Bind(wx.EVT_COMBOBOX, self.OnSelect1)
 
         self.serial_list2 = wx.StaticText(panel, label="串口2：", pos=(200, 395), size=(50, 20), style=wx.ALIGN_LEFT)
@@ -240,6 +243,9 @@ class MyFrame(wx.Frame):
         if self.cb2.GetCount() > 0:
             self.com2_name = self.cb2.GetStringSelection().split(' ')[0]
             self.statusbar.SetStatusText(self.com2_name + " 未连接", 1)
+        else:
+            self.statusbar.SetStatusText("未找到串口2, 请检查！", 1)
+
         self.cb2.Bind(wx.EVT_COMBOBOX, self.OnSelect2)
 
         print("当前选择：%s\n com1_name: %s" % (self.cb1.GetStringSelection(), self.com1_name))
