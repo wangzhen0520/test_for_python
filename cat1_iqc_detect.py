@@ -211,7 +211,7 @@ class MyFrame(wx.Frame):
 
         self.statusbar = self.CreateStatusBar()  # 创建状态栏
         self.statusbar.SetFieldsCount(3)
-        self.statusbar.SetStatusWidths([-1, -2, -3])
+        self.statusbar.SetStatusWidths([-1, -1, -2])
 
         self.sc1 = SerialCommunication()
         self.sc2 = SerialCommunication()
