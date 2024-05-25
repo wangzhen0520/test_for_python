@@ -2,5 +2,6 @@
 	"interference_duration": 60,
 	"interference_num" : 0,
 	"time_interval"	: 200,
-	"next_interference_interval": 60
+	"next_interference_interval": 60,
+	"target_version": "FIKS-CAT1-CR010"
 }
