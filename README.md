@@ -10,3 +10,6 @@ pip install pyserial
 pip install pillow
 # 打包exe
 pyinstaller -F lora_interference_simulation.py --hidden-import serial
+
+# cat1_iqc_detect.py
+pip install wxPython

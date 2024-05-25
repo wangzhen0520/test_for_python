@@ -37,7 +37,10 @@ class SerialCommunication:
     def close_serial_port(self, ser):
         if self.recv_queue.empty() == False:
             self.recv_queue.get_nowait()
-        ser.close()
+
+        if ser.isOpen() == True:
+            ser.close()
+            print("close serial port: %s success" % ser.port)
 
     def send_str_data(self, ser, data):
         if ser.isOpen() == False:
@@ -77,6 +80,12 @@ class SerialCommunication:
         while self.run_flag:
             time.sleep(0.3)
             if self.ser_receive_flag == False:
+                continue
+
+            if self.ser == None:
+                continue
+
+            if self.ser.isOpen() == False:
                 continue
         
             try:
@@ -131,10 +140,17 @@ class SerialCommunication:
         self.ser_receive_flag = False
         # self.receive_thread.join()
 
-
 class MyFrame(wx.Frame):
     def __init__(self, *args, **kw):
         super(MyFrame, self).__init__(*args, **kw)
+
+        self.cat1_ver = ""
+        self.csq = ""
+        self.task_run_flag = False
+        self.task_run = False
+        self.com1_name = ""
+        self.com2_name = ""
+
         self.InitUI()
     
     def InitUI(self):
@@ -202,19 +218,26 @@ class MyFrame(wx.Frame):
         self.cb1 = wx.ComboBox(panel, pos = (60, 390), choices = [], style = wx.CB_READONLY)
         self.cb1.Clear()
         for item in self.ser_ports:
+            if not item[2].startswith("ASR"):
+                continue
             self.cb1.Append(item[1] + "  " + item[2])
-        self.cb1.SetSelection(0)
-        self.com1_name = self.cb1.GetStringSelection().split(' ')[0]
-        self.statusbar.SetStatusText(self.com1_name + " 未连接", 0)
+
+        if self.cb1.GetCount() > 0:
+            self.cb1.SetSelection(0)
+            self.com1_name = self.cb1.GetStringSelection().split(' ')[0]
+            self.statusbar.SetStatusText(self.com1_name + " 未连接", 0)
         self.cb1.Bind(wx.EVT_COMBOBOX, self.OnSelect1)
 
         self.serial_list2 = wx.StaticText(panel, label="串口2：", pos=(200, 395), size=(50, 20), style=wx.ALIGN_LEFT)
         self.cb2 = wx.ComboBox(panel, pos = (250, 390), choices = [], style = wx.CB_READONLY)
         self.cb2.Clear()
+        for item in self.ser_ports:
+            self.cb2.Append(item[1] + "  " + item[2])
         if len(self.ser_ports) > 1:
-            for item in self.ser_ports:
-                self.cb2.Append(item[1] + "  " + item[2])
             self.cb2.SetSelection(1)
+        else:
+            self.cb2.SetSelection(0)
+        if self.cb2.GetCount() > 0:
             self.com2_name = self.cb2.GetStringSelection().split(' ')[0]
             self.statusbar.SetStatusText(self.com2_name + " 未连接", 1)
         self.cb2.Bind(wx.EVT_COMBOBOX, self.OnSelect2)
@@ -223,10 +246,6 @@ class MyFrame(wx.Frame):
         print("当前选择：%s\n com2_name: %s" % (self.cb2.GetStringSelection(), self.com2_name))
 
         self.load_config()
-        self.cat1_ver = ""
-        self.csq = ""
-        self.task_run_flag = False
-        self.task_run = False
 
     def OnSelect1(self, e):
         str = e.GetString()

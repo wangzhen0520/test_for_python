@@ -48,7 +48,7 @@ def demo(ip):
             # create_memout()
             # print("-----END-------")
     except:
-        raise ("FAIL!!")
+        raise "FAIL!!"
 
 
 def testCallOSD(ip):
@@ -71,7 +71,7 @@ def testCallOSD(ip):
             sleep(0.1)
             i += 1
     except:
-        raise ("FAIL!!")
+        raise "FAIL!!"
 
 
 def testTDome(ip):
@@ -130,7 +130,7 @@ def testvhdParam(ip):
             print("[%s] 第【%s】次SET：状态[%s]" % (datetime.now(), i, r.status_code))
             # sleep(10)
     except:
-        raise ("FAIL!!")
+        raise "FAIL!!"
 
 
 def testMultiTask(ip):
@@ -159,13 +159,12 @@ def testMultiTask(ip):
                 print("第【%s】次SET：状态[%s]" % (i, r.status_code))
                 sleep(3)
     except:
-        raise ("FAIL!!")
+        raise "FAIL!!"
 
 
 def testLight(ip):
     appurl = 'https://%s/SDCAPI/V1.0/ItsApp/ManualSnap' % ip
     data = '{"UUID":"4dbbe6ed-06af-2bb7-55d4-bb454662ac2c","snapNum":1,"snapInterval":[0,0,0,0]}'
-
     appurl2 = 'https://%s/SDCAPI/V1.0/IspIaas/DN?UUID=4dbbe6ed-06af-2bb7-55d4-bb454662ac2c&AlgMode=0' % ip
     try:
         i = 0
@@ -202,7 +201,7 @@ def testLight(ip):
                 j += 1
             i += 1
     except:
-        raise ("FAIL!!")
+        raise "FAIL!!"
 
 
 def getSpecification():
@@ -217,7 +216,7 @@ def getSpecification():
         data = json.loads(r.text)
         # print('data: %s' % data)
     except:
-        raise ("FAIL!!")
+        raise "FAIL!!"
 
 
 '''
