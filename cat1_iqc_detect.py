@@ -1,10 +1,13 @@
 # coding=utf-8
 
 import wx
-import os
 import serial
 import serial.tools.list_ports
-import threading, time, queue, json
+import threading
+import time
+import queue
+import json
+
 
 class SerialCommunication:
     def __init__(self):
@@ -55,7 +58,7 @@ class SerialCommunication:
         if ser.isOpen() == False:
             return
 
-        print("send: [%d] %s" %((len(data) + 1) / 3, data))
+        print("send: [%d] %s" % ((len(data) + 1) / 3, data))
         ser.write(bytearray.fromhex(data))
 
     def crc16(self, data: bytes) -> int:
@@ -82,28 +85,28 @@ class SerialCommunication:
             if self.ser_receive_flag == False:
                 continue
 
-            if self.ser == None:
+            if self.ser is None:
                 continue
 
             if self.ser.isOpen() == False:
                 continue
-        
+
             try:
                 cnt = self.ser.in_waiting
                 if cnt <= 0:
                     time.sleep(0.1)
                     continue
-                
+
                 received_data = self.ser.read(cnt)
             except serial.serialutil.SerialException:
                 print("SerialException")
                 continue
-                
+
             if received_data[0] == 0xF4:
                 hex_str = ""
                 recv_hex_str = received_data.hex()
                 for i in range(0, len(recv_hex_str), 2):
-                    hex_str += recv_hex_str[i:i+2].upper() + " "
+                    hex_str += recv_hex_str[i:i + 2].upper() + " "
                 print("recv: [%d] %s" % (len(hex_str) / 3, hex_str))
 
                 # crc 校验
@@ -140,6 +143,7 @@ class SerialCommunication:
         self.ser_receive_flag = False
         # self.receive_thread.join()
 
+
 class MyFrame(wx.Frame):
     def __init__(self, *args, **kw):
         super(MyFrame, self).__init__(*args, **kw)
@@ -152,7 +156,7 @@ class MyFrame(wx.Frame):
         self.com2_name = ""
 
         self.InitUI()
-    
+
     def InitUI(self):
         self.SetTitle('')
         self.SetSize((800, 480))
@@ -169,11 +173,11 @@ class MyFrame(wx.Frame):
 
         self.label_title = wx.StaticText(panel, label="CAT1模块IQC检测程序", style=wx.ALIGN_CENTER)
         self.label_title.SetFont(font_1)
-        self.label_title.SetForegroundColour((255,0,0))
+        self.label_title.SetForegroundColour((255, 0, 0))
 
         # 设置标签的尺寸，使其居中
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(self.label_title, 0, wx.ALL|wx.CENTER, 25) # 5是边距
+        sizer.Add(self.label_title, 0, wx.ALL | wx.CENTER, 25)  # 5是边距
         panel.SetSizer(sizer)
 
         self.label_sw_vertion = wx.StaticText(panel, label="软件版本号：", pos=(50, 100), size=(200, 30), style=wx.ALIGN_RIGHT)
@@ -200,7 +204,7 @@ class MyFrame(wx.Frame):
         self.label_result.SetFont(font_4)
         self.label_result_text = wx.StaticText(panel, label="", pos=(370, 320))
         self.label_result_text.SetFont(font_5)
-        self.label_result_text.SetForegroundColour((0,255,0))
+        self.label_result_text.SetForegroundColour((0, 255, 0))
 
         self.button = wx.Button(panel, label="开始检测", pos=(390, 390))
         self.button.Bind(wx.EVT_BUTTON, self.on_button_click)
@@ -213,9 +217,9 @@ class MyFrame(wx.Frame):
         self.sc2 = SerialCommunication()
         self.ser_ports = self.sc1.get_available_ports()
 
-        #创建一个只读下拉列表，可选择Linux的各种发行版本
+        # 创建一个只读下拉列表，可选择Linux的各种发行版本
         self.serial_list1 = wx.StaticText(panel, label="串口1：", pos=(10, 395), size=(50, 20), style=wx.ALIGN_LEFT)
-        self.cb1 = wx.ComboBox(panel, pos = (60, 390), choices = [], style = wx.CB_READONLY)
+        self.cb1 = wx.ComboBox(panel, pos=(60, 390), choices=[], style=wx.CB_READONLY)
         self.cb1.Clear()
         for item in self.ser_ports:
             if not item[2].startswith("ASR"):
@@ -232,7 +236,7 @@ class MyFrame(wx.Frame):
         self.cb1.Bind(wx.EVT_COMBOBOX, self.OnSelect1)
 
         self.serial_list2 = wx.StaticText(panel, label="串口2：", pos=(200, 395), size=(50, 20), style=wx.ALIGN_LEFT)
-        self.cb2 = wx.ComboBox(panel, pos = (250, 390), choices = [], style = wx.CB_READONLY)
+        self.cb2 = wx.ComboBox(panel, pos=(250, 390), choices=[], style=wx.CB_READONLY)
         self.cb2.Clear()
         for item in self.ser_ports:
             self.cb2.Append(item[1] + "  " + item[2])
@@ -277,9 +281,9 @@ class MyFrame(wx.Frame):
         if self.ser1 is not None:
             while self.sc1.recv_queue.empty() == False:
                 self.sc1.recv_queue.get_nowait()
-            
+
             self.sc1.send_str_data(self.ser1, "AT+GSN=1\r\n")
-            
+
             try:
                 data_str = self.sc1.recv_queue.get(timeout=1)
             except queue.Empty:
@@ -312,9 +316,9 @@ class MyFrame(wx.Frame):
         if self.ser1 is not None:
             while self.sc1.recv_queue.empty() == False:
                 self.sc1.recv_queue.get_nowait()
-            
+
             self.sc1.send_str_data(self.ser1, "AT+ICCID\r\n")
-            
+
             try:
                 data_str = self.sc1.recv_queue.get(timeout=1)
             except queue.Empty:
@@ -374,8 +378,8 @@ class MyFrame(wx.Frame):
                 # 查询IMEI号
                 imei = self.get_cat1_imei()
                 self.label_imei_text.SetLabelText(imei)
-                
-                #查询ICCID
+
+                # 查询ICCID
                 iccid = self.get_cat1_iccid()
                 self.label_iccid_text.SetLabelText(iccid)
 
@@ -394,7 +398,7 @@ class MyFrame(wx.Frame):
                     else:
                         self.label_result_text.SetLabelText("FAIL")
                         self.label_result_text.SetForegroundColour((255, 0, 0))
-            
+
             time.sleep(1)
 
     def on_button_click(self, event):
@@ -442,11 +446,13 @@ class MyFrame(wx.Frame):
             self.task_thread.daemon = True
             self.task_thread.start()
 
+
 def main():
     app = wx.App()
     ex = MyFrame(None)
     ex.Show()
     app.MainLoop()
+
 
 if __name__ == '__main__':
     main()
