@@ -271,6 +271,7 @@ class MyFrame(wx.Frame):
         self.imei = ""  # cat1 IMEI号码
         self.iccid = ""  # cat1 ICCID号码
 
+        self.auto_detect_flag = False  # 自动检测使能标志
         self.task_run_flag = False  # 检测线程运行检测标志
         self.task_run_enable = False  # 检测线程运行总开关
         self.com1_name = ""  # 串口1 名称
@@ -378,6 +379,7 @@ class MyFrame(wx.Frame):
         self.statusbar.SetStatusText("   成功: " + str(self.success_count) + "       失败: " + str(self.fail_count), 2)
 
         self.cb2.Bind(wx.EVT_COMBOBOX, self.OnSelect2)
+        self.Bind(wx.EVT_CLOSE, self.CloseWindow)  # 判断窗口关闭
 
         logger.info("当前选择：%s\n com1_name: %s" % (self.cb1.GetStringSelection(), self.com1_name))
         logger.info("当前选择：%s\n com2_name: %s" % (self.cb2.GetStringSelection(), self.com2_name))
@@ -398,6 +400,14 @@ class MyFrame(wx.Frame):
         str = e.GetString()
         self.com2_name = str.split(' ')[0]
         logger.info("当前选择：%s\n com2_name: %s" % (str, self.com2_name))
+
+    def CloseWindow(self, event):
+        # 弹出确认对话框
+        result = wx.MessageBox("确定要退出吗？", "确认", wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
+        if result == wx.YES:
+            self.Destroy()  # 确认则关闭窗口
+        else:
+            event.Veto()  # 否则取消关闭
 
     def load_config(self):
         try:
@@ -508,15 +518,17 @@ class MyFrame(wx.Frame):
             if cnt != 0:
                 # 查询IMEI号
                 self.get_cat1_imei()
-                self.label_imei_text.SetLabelText(self.imei)
+                if self.task_run_flag:
+                    self.label_imei_text.SetLabelText(self.imei)
 
                 # 查询ICCID
                 self.get_cat1_iccid()
-                self.label_iccid_text.SetLabelText(self.iccid)
+                if self.task_run_flag:
+                    self.label_iccid_text.SetLabelText(self.iccid)
 
                 # 查询版本号
                 self.get_cat1_version()
-                if self.cat1_ver:
+                if self.task_run_flag and self.cat1_ver:
                     self.label_sw_vertion_text.SetLabelText(self.cat1_ver)
                     self.label_csq_text.SetLabelText(str(self.csq) + " dBm")
 
@@ -552,11 +564,10 @@ class MyFrame(wx.Frame):
         self.label_sw_vertion_text.SetLabelText("")
         self.label_result_text.SetLabelText("")
 
-        if self.button.GetLabelText() == "开始检测":
-            self.button.SetLabelText("停止检测")
-        else:
+        if self.button.GetLabelText() == "停止检测":
             self.button.SetLabelText("开始检测")
 
+            self.auto_detect_flag = False
             self.task_run_flag = False
             self.sc1.stop_serial_threads()
             self.sc2.stop_serial_threads()
@@ -572,7 +583,6 @@ class MyFrame(wx.Frame):
         if not (self.ser1 and self.ser2):
             self.sc1.close_serial_port(self.ser1)
             self.sc2.close_serial_port(self.ser2)
-            self.button.SetLabelText("开始检测")
             if not self.ser1:
                 wx.MessageBox("串口1 " + self.com1_name + " 打开失败", "错误", wx.OK | wx.ICON_ERROR)
             else:
@@ -592,7 +602,9 @@ class MyFrame(wx.Frame):
             self.statusbar.SetStatusText(self.com2_name + " 连接失败", 1)
 
         # 启动检测线程
+        self.button.SetLabelText("停止检测")
         self.task_run_flag = True
+        self.auto_detect_flag = True
         if self.task_run_enable == False:
             self.task_run_enable = True
             self.task_thread = threading.Thread(target=self.detect_task)
@@ -677,7 +689,7 @@ class MyFrame(wx.Frame):
                                 if self.com1_name == self.cb1.GetString(i).split(" ")[0] and self.com1_name == port[1]:
                                     self.cb1.SetSelection(i)
 
-                                    if self.task_run_enable:
+                                    if self.task_run_enable and self.auto_detect_flag:
                                         self.ser1 = self.sc1.open_serial_port(self.com1_name, 115200)
                                         self.statusbar.SetStatusText(self.com1_name + " 已连接", 0)
                                         self.resume_auto_detect()
@@ -700,7 +712,7 @@ class MyFrame(wx.Frame):
                                 if self.com2_name == self.cb2.GetString(i).split(" ")[0] and self.com2_name == port[1]:
                                     self.cb2.SetSelection(i)
 
-                                    if self.task_run_enable:
+                                    if self.task_run_enable and self.auto_detect_flag:
                                         self.ser2 = self.sc2.open_serial_port(self.com2_name, 9600)
                                         self.statusbar.SetStatusText(self.com2_name + " 已连接", 1)
                                         self.resume_auto_detect()
