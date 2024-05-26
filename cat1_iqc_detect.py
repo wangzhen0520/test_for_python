@@ -7,6 +7,10 @@ import threading
 import time
 import queue
 import json
+import os
+import logging
+from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 
 
 def get_available_ports():
@@ -20,7 +24,83 @@ def get_available_ports():
 
 def show_available_ports(ports):
     for item in ports:
-        print("%-10s %-10s %-50s" % (item[0], item[1], item[2]))
+        logger.info("%-10s %-10s %-50s" % (item[0], item[1], item[2]))
+
+
+LOG_PATH = "logs"
+
+
+class Mylogger:
+    def __init__(self) -> None:
+        self.logger = None
+        self.init_log()
+
+    def init_log(self):
+        self.logger = logging.getLogger()
+        self.logger.setLevel(logging.DEBUG)
+
+        if not os.path.exists(LOG_PATH):
+            os.mkdir(LOG_PATH)
+
+        format_option = logging.Formatter(
+            '%(asctime)s.%(msecs)03d | %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S')
+
+        now = datetime.now().strftime("%Y-%m-%d")
+        file_name = f'AutoTest_{now}.log'
+
+        # 创建控制台处理器
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(format_option)
+
+        # 创建文件处理器
+        file_handler = TimedRotatingFileHandler(filename=LOG_PATH + '/' +
+                                                file_name,
+                                                when='MIDNIGHT',
+                                                interval=1,
+                                                backupCount=7,
+                                                encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(format_option)
+
+        # 统计日志文件名
+        count_file_name = 'count-' + time.strftime(
+            '%Y-%m-%d', time.localtime(time.time())) + '.log'
+        # 统计文件格式
+        count_log_formatter = logging.Formatter('%(message)s')
+        # 统计日志处理器
+        count_handler = TimedRotatingFileHandler(filename='logs/' +
+                                                 count_file_name,
+                                                 when='MIDNIGHT',
+                                                 interval=1,
+                                                 backupCount=7,
+                                                 encoding='utf-8')
+        count_handler.setFormatter(count_log_formatter)
+        count_handler.setLevel(logging.FATAL)
+
+        # 将处理器添加到logger对象中
+        self.logger.addHandler(console_handler)
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(count_handler)
+
+    def info(self, msg, *args, **kwargs):
+        self.logger.info(msg, *args, **kwargs)
+
+    def warn(self, msg, *args, **kwargs):
+        self.logger.warn(msg, *args, **kwargs)
+
+    def error(self, msg, *args, **kwargs):
+        self.logger.error(msg, *args, **kwargs)
+
+    def debug(self, msg, *args, **kwargs):
+        self.logger.debug(msg, *args, **kwargs)
+
+    def count_log(self, msg, *args, **kwargs):
+        self.logger.fatal(msg, *args, **kwargs)
+
+
+logger = Mylogger()
 
 
 class SerialCommunication:
@@ -32,10 +112,10 @@ class SerialCommunication:
     def open_serial_port(self, port_name, baud_rate):
         try:
             ser = serial.Serial(port_name, baud_rate)
-            print("open serial port: %s success" % port_name)
+            logger.info("open serial port: %s success" % port_name)
             return ser
         except serial.serialutil.SerialException:
-            print("PermissionError: Please check the permission of the serial port.")
+            logger.error("PermissionError: Please check the permission of the serial port.")
             return None
 
     def close_serial_port(self, ser):
@@ -47,7 +127,7 @@ class SerialCommunication:
 
         if ser.isOpen() == True:
             ser.close()
-            print("close serial port: %s success" % ser.port)
+            logger.info("close serial port: %s success" % ser.port)
 
         ser = None
 
@@ -58,11 +138,11 @@ class SerialCommunication:
         if ser.isOpen() == False:
             return
 
-        print(f"Sent: {data}")
+        logger.info(f"Sent: {data}")
         try:
             ser.write((data + "\n").encode("utf-8"))
         except serial.serialutil.SerialException:
-            print("WriteFile failed")
+            logger.error("WriteFile failed")
 
     def send_byte_data(self, ser, data):
         if len(data) == 0:
@@ -74,11 +154,11 @@ class SerialCommunication:
         if ser.isOpen() == False:
             return
 
-        print("send: [%d] %s" % ((len(data) + 1) / 3, data))
+        logger.info("send: [%d] %s" % ((len(data) + 1) / 3, data))
         try:
             ser.write(bytearray.fromhex(data))
         except serial.serialutil.SerialException:
-            print("WriteFile failed")
+            logger.error("WriteFile failed")
 
     def crc16(self, data: bytes) -> int:
         # 初始化crc为0xFFFF
@@ -119,39 +199,42 @@ class SerialCommunication:
 
                 received_data = self.ser.read(cnt)
             except serial.serialutil.SerialException:
-                print("receive data SerialException")
+                logger.error("receive data SerialException")
                 self.ser_receive_flag = False
                 # time.sleep(1)
                 continue
 
             if len(received_data) == 0:
                 continue
+            
+            if self.recv_queue.qsize() > 2048:
+                self.recv_queue.get_nowait()
 
             if received_data[0] == 0xF4:
                 hex_str = ""
                 recv_hex_str = received_data.hex()
                 for i in range(0, len(recv_hex_str), 2):
                     hex_str += recv_hex_str[i:i + 2].upper() + " "
-                print("recv: [%d] %s" % (len(hex_str) / 3, hex_str))
+                logger.info("recv: [%d] %s" % (len(hex_str) / 3, hex_str))
 
                 # crc 校验
                 crc = self.crc16(received_data[0:cnt - 2]).to_bytes(2, 'big')
                 if not (crc[0] == received_data[cnt - 2]
                         and crc[1] == received_data[cnt - 1]):
-                    print("crc check fail")
+                    logger.warn("crc check fail")
 
                 self.recv_queue.put(received_data)
             else:
                 try:
                     if isinstance(received_data.decode('utf-8'), str):
                         recv_data = received_data.decode()
-                        print(recv_data)
+                        logger.info(recv_data)
                         self.recv_queue.put(recv_data)
                     else:
-                        print("not str")
+                        logger.warn("not str")
                 except UnicodeDecodeError:
-                    print("UnicodeDecodeError")
-                    print(received_data)
+                    logger.warn("UnicodeDecodeError")
+                    logger.info(received_data)
 
     def start_serial_threads(self, ser):
         self.ser = ser
@@ -296,8 +379,8 @@ class MyFrame(wx.Frame):
 
         self.cb2.Bind(wx.EVT_COMBOBOX, self.OnSelect2)
 
-        print("当前选择：%s\n com1_name: %s" % (self.cb1.GetStringSelection(), self.com1_name))
-        print("当前选择：%s\n com2_name: %s" % (self.cb2.GetStringSelection(), self.com2_name))
+        logger.info("当前选择：%s\n com1_name: %s" % (self.cb1.GetStringSelection(), self.com1_name))
+        logger.info("当前选择：%s\n com2_name: %s" % (self.cb2.GetStringSelection(), self.com2_name))
 
         self.load_config()
 
@@ -309,21 +392,21 @@ class MyFrame(wx.Frame):
     def OnSelect1(self, e):
         str = e.GetString()
         self.com1_name = str.split(' ')[0]
-        print("当前选择：%s\n com1_name: %s" % (str, self.com1_name))
+        logger.info("当前选择：%s\n com1_name: %s" % (str, self.com1_name))
 
     def OnSelect2(self, e):
         str = e.GetString()
         self.com2_name = str.split(' ')[0]
-        print("当前选择：%s\n com2_name: %s" % (str, self.com2_name))
+        logger.info("当前选择：%s\n com2_name: %s" % (str, self.com2_name))
 
     def load_config(self):
         try:
             with open("config.json", 'r', encoding='UTF-8') as f:
                 buf = json.load(f)
                 self.target_version = buf.get('target_version')
-                print("target_version: %s" % self.target_version)
+                logger.info("target_version: %s" % self.target_version)
         except FileNotFoundError:
-            print("config.json not found")
+            logger.error("config.json not found")
             wx.MessageBox("配置文件加载失败，请检查！", "错误", wx.OK | wx.ICON_ERROR)
             return None
 
@@ -349,15 +432,15 @@ class MyFrame(wx.Frame):
                     imei = ""
 
             if (result == "OK"):
-                print("imei %s" % imei)
+                logger.info("imei %s" % imei)
                 if imei.find("+GSN:") != -1:
                     imei = imei.split("+GSN:")
                     if len(imei) > 1:
                         imei = imei[1].strip()
-                    print("get imei is {0}".format(imei))
+                    logger.info("get imei is {0}".format(imei))
                     self.imei = imei.strip()
             else:
-                print("get data is {0}".format(data_str))
+                logger.info("get data is {0}".format(data_str))
                 return
 
     def get_cat1_iccid(self):
@@ -383,10 +466,10 @@ class MyFrame(wx.Frame):
 
             if (result == "OK"):
                 iccid = iccid.split("+ICCID:")[1]
-                print("get iccid is {0}".format(iccid))
+                logger.info("get iccid is {0}".format(iccid))
                 self.iccid = iccid.strip()
             else:
-                print("get data is {0}".format(data_str))
+                logger.error("get data is {0}".format(data_str))
                 return
 
     def get_cat1_version(self):
@@ -407,12 +490,12 @@ class MyFrame(wx.Frame):
                 try:
                     self.cat1_ver = data_str[8:23].decode('utf-8')
                 except Exception as e:
-                    print("decode error is {0}".format(e))
+                    logger.error("decode error is {0}".format(e))
 
                 self.csq = data_str[24] - 256
 
-            print("cat1_ver is {0}".format(self.cat1_ver))
-            print("csq is {0}".format(self.csq))
+            logger.info("cat1_ver is {0}".format(self.cat1_ver))
+            logger.info("csq is {0}".format(self.csq))
 
     def detect_task(self):
         cnt = 3
@@ -444,13 +527,17 @@ class MyFrame(wx.Frame):
                         self.label_result_text.SetLabelText("PASS")
                         self.label_result_text.SetForegroundColour((0, 255, 0))
                         self.success_count += 1
+                        logger.count_log(self.imei + "   PASS")
                     else:
                         self.label_result_text.SetLabelText("FAIL")
                         self.label_result_text.SetForegroundColour((255, 0, 0))
                         self.fail_count += 1
+                        logger.count_log(self.imei + "   FAIL")
 
                     self.statusbar.SetStatusText("   成功: " + str(self.success_count) + "       失败: " + str(self.fail_count), 2)
-
+                    
+                    
+                    
             time.sleep(1)
 
     def on_button_click(self, event):
@@ -536,7 +623,7 @@ class MyFrame(wx.Frame):
                 removeList = [port for port in self.ser_ports if port not in current_ports]
                 if len(removeList) > 0:
                     for port in removeList:
-                        print("detect serial remove: %s" % port)
+                        logger.info("detect serial remove: %s" % port)
                         remove_index = []
                         for i in range(self.cb1.GetCount()):
                             if port[1] == self.cb1.GetString(i).split(" ")[0]:
@@ -574,7 +661,7 @@ class MyFrame(wx.Frame):
                 addList = [port for port in current_ports if port not in self.ser_ports]
                 if len(addList) > 0:
                     for port in addList:
-                        print("detect serial plug: %s" % port)
+                        logger.info("detect serial plug: %s" % port)
                         if port[2].startswith("ASR"):
                             if self.cb1.GetCount() == 0:
                                 self.statusbar.SetStatusText(self.com1_name + " 未连接", 0)
@@ -584,7 +671,7 @@ class MyFrame(wx.Frame):
 
                             if self.com1_name == "":
                                 self.com1_name = self.cb1.GetStringSelection().split(' ')[0]
-                                print("当前选择：%s\n com1_name: %s" % (self.cb1.GetStringSelection(), self.com1_name))
+                                logger.info("当前选择：%s\n com1_name: %s" % (self.cb1.GetStringSelection(), self.com1_name))
 
                             for i in range(self.cb1.GetCount()):
                                 if self.com1_name == self.cb1.GetString(i).split(" ")[0] and self.com1_name == port[1]:
@@ -607,7 +694,7 @@ class MyFrame(wx.Frame):
 
                             if self.com2_name == "":
                                 self.com2_name = self.cb2.GetStringSelection().split(' ')[0]
-                                print("当前选择：%s\n com2_name: %s" % (self.cb2.GetStringSelection(), self.com2_name))
+                                logger.info("当前选择：%s\n com2_name: %s" % (self.cb2.GetStringSelection(), self.com2_name))
 
                             for i in range(self.cb2.GetCount()):
                                 if self.com2_name == self.cb2.GetString(i).split(" ")[0] and self.com2_name == port[1]:
