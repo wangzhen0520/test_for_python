@@ -185,15 +185,18 @@ class MyFrame(wx.Frame):
 
         self.cat1_ver = ""  # cat1 软件版本号
         self.csq = ""  # cat1 信号强度
-        self.imei = "" # cat1 IMEI号码
-        self.iccid = "" # cat1 ICCID号码
-        
+        self.imei = ""  # cat1 IMEI号码
+        self.iccid = ""  # cat1 ICCID号码
+
         self.task_run_flag = False  # 检测线程运行检测标志
         self.task_run_enable = False  # 检测线程运行总开关
         self.com1_name = ""  # 串口1 名称
         self.com2_name = ""  # 串口2 名称
         self.ser1 = None  # 串口1 对象句柄
         self.ser2 = None  # 串口2 对象句柄
+
+        self.success_count = 0  # 成功次数统计
+        self.fail_count = 0  # 失败次数统计
 
         self.InitUI()
 
@@ -288,6 +291,8 @@ class MyFrame(wx.Frame):
             self.statusbar.SetStatusText(self.com2_name + " 未连接", 1)
         else:
             self.statusbar.SetStatusText("未找到串口2, 请检查！", 1)
+
+        self.statusbar.SetStatusText("   成功: " + str(self.success_count) + "       失败: " + str(self.fail_count), 2)
 
         self.cb2.Bind(wx.EVT_COMBOBOX, self.OnSelect2)
 
@@ -438,9 +443,13 @@ class MyFrame(wx.Frame):
                     if self.target_version == self.cat1_ver:
                         self.label_result_text.SetLabelText("PASS")
                         self.label_result_text.SetForegroundColour((0, 255, 0))
+                        self.success_count += 1
                     else:
                         self.label_result_text.SetLabelText("FAIL")
                         self.label_result_text.SetForegroundColour((255, 0, 0))
+                        self.fail_count += 1
+
+                    self.statusbar.SetStatusText("   成功: " + str(self.success_count) + "       失败: " + str(self.fail_count), 2)
 
             time.sleep(1)
 
@@ -595,7 +604,7 @@ class MyFrame(wx.Frame):
 
                             self.cb2.Append(port[1] + "  " + port[2])
                             self.cb2.SetSelection(0)
-                            
+
                             if self.com2_name == "":
                                 self.com2_name = self.cb2.GetStringSelection().split(' ')[0]
                                 print("当前选择：%s\n com2_name: %s" % (self.cb2.GetStringSelection(), self.com2_name))
