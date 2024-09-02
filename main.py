@@ -5,10 +5,6 @@ import os
 import sys
 import string
 
-reload(sys)
-sys.setdefaultencoding('utf8')
-
-
 # 你有H盘吗？没有的话在这个初始化函数里修改加载的初始路径
 class PBDirFrame(wx.Frame):
     def __init__(self, app):
@@ -254,6 +250,22 @@ def main():
     app = PBApp()
     app.MainLoop()
 
+from PIL import Image
+
+def rgb24Torgb32():
+    path  = "E:\\share\\img\\png\\weak"
+    for filename in os.listdir(path):
+        print(filename)
+        file = path + "\\" + filename
+        img = Image.open(file)
+        # print(img.mode)
+        if (img.mode == 'RGB'):        
+            new_img = Image.new('RGBA', img.size)
+            new_img.paste(img, (0, 0))
+            new_img.save(file)
+            print("change [%s] to RGBA success" % filename)
+ 
 
 if __name__ == '__main__':
-    main()
+    # main()
+    rgb24Torgb32()
