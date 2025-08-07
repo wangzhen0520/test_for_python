@@ -7,7 +7,7 @@ pip install asyncio
 pip install websockets
 
 '''
-
+import os
 import asyncio
 import uuid
 import json
@@ -19,7 +19,8 @@ import hashlib
 product_id = "279630209"
 product_key = "085757baadb96edbffcdc2f09ab68ab7"
 product_secret = "ef59258308d5691c39e07626e0e7a983"
-voice_id = "gdfanfp"
+# voice_id = "gdfanfp"
+voice_id = "jlshimp"
 api_reg_url = "https://auth.dui.ai/auth/device/register"
 api_tts_url = "https://tts.dui.ai/runtime/v2/synthesize"
 formate = "plain"
@@ -103,16 +104,25 @@ def submit_tts(device_secret, text):
     response = requests.post(url, data=payload_body, headers={
         'Content-Type': 'application/json'})
     # print(response.text)
-    with open(f"{text}.mp3", "wb") as f:
+    path = f"{voice_id}"
+    if not os.path.exists(path):
+        os.makedirs(path)
+        print(f"文件夹 {path} 创建成功")
+
+    file_path = os.path.join(path, f"{text}.mp3")
+    with open(file_path, "wb") as f:
         f.write(response.content)
-        print(f"write file {text}.mp3 success")
+        print(f"write file {file_path} success")
 
 
 async def test_submit():
     req_device_secret = reg_device()
-    text_list = ['网络不稳定,请稍后重试', '授权失败了,请重新授权', '网络离线了,我听不懂你说什么',
-                 '鉴权失败了,请重新授权', '响应超时了,暂时不能为您服务', '抱歉帮不了您, 有需要再叫我哦',
-                 '抱歉没听懂你说什么, 有需要再叫我哦']
+    # text_list = ['网络不稳定,请稍后重试', '授权失败了,请重新授权', '网络离线了,我听不懂你说什么',
+    #              '鉴权失败了,请重新授权', '响应超时了,暂时不能为您服务', '抱歉帮不了您, 有需要再叫我哦',
+    #              '抱歉没听懂你说什么, 有需要再叫我哦']
+    # text_list = ['语音资源初始化失败了, 请稍后重试']
+    text_list = ['我在呢']
+
     for text in text_list:
         submit_tts(req_device_secret, text)
 
