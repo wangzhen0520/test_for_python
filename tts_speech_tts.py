@@ -49,8 +49,7 @@ def reg_device() -> str:
     sig_data = f"{product_key}{formate}{nonce}{product_id}{timestamp}"
     print("sig_data: %s" % sig_data)
 
-    signature = hmac_sha1(product_secret.encode(
-        "utf-8"), sig_data.encode("utf-8"))
+    signature = hmac_sha1(product_secret.encode("utf-8"), sig_data.encode("utf-8"))
     print("signature: %s" % signature)
 
     url = f'{api_reg_url}?productKey={product_key}&format={formate}&productId={product_id}&timestamp={timestamp}&nonce={nonce}&sig={signature}'
@@ -62,8 +61,7 @@ def reg_device() -> str:
     }
     payload_body = str.encode(json.dumps(body))
 
-    response = requests.post(url, data=payload_body, headers={
-        'Content-Type': 'application/json'})
+    response = requests.post(url, data=payload_body, headers={'Content-Type': 'application/json'})
     print(response.text)
     rsp_str = json.loads(response.text)
     device_secret = rsp_str['deviceSecret']
@@ -75,8 +73,7 @@ def submit_tts(device_secret, text):
     nonce = str(uuid.uuid4()).replace("-", "")
     timestamp = int(round(time.time() * 1000))
     sig_data = f"{device_name}{nonce}{product_id}{timestamp}"
-    signature = hmac_sha1(device_secret.encode(
-        "utf-8"), sig_data.encode("utf-8"))
+    signature = hmac_sha1(device_secret.encode("utf-8"), sig_data.encode("utf-8"))
 
     body = {
         "context": {
