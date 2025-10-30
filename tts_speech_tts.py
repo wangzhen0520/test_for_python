@@ -104,7 +104,7 @@ def submit_tts(voice_id, device_secret, text_name, text):
         os.makedirs(path)
         print(f"文件夹 {path} 创建成功")
 
-    file_path = os.path.join(path, f"{text_name}.mp3")
+    file_path = os.path.join(path, f"{text_name}")
     with open(file_path, "wb") as f:
         f.write(response.content)
         print(f"write file {file_path} success")
