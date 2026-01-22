@@ -105,37 +105,63 @@ class SerialPortMonitor(threading.Thread):
                 time.sleep(self.interval)
 
 class FlashFileItem(wx.Panel):
-    """烧录文件条目"""
-    def __init__(self, parent, index, on_remove_callback):
+    """烧录文件条目 - 增加勾选和内部/外部Flash选项"""
+    def __init__(self, parent, index, on_remove_callback, on_check_callback):
         super().__init__(parent)
         self.index = index
         self.on_remove_callback = on_remove_callback
+        self.on_check_callback = on_check_callback
         self.init_ui()
     
     def init_ui(self):
-        hbox = wx.BoxSizer(wx.HORIZONTAL)
+        vbox = wx.BoxSizer(wx.VERTICAL)
         
-        hbox.Add(wx.StaticText(self, label=f"文件{self.index+1}:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        # 第一行：文件选择和地址
+        hbox1 = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # 是否启用烧录复选框
+        self.enable_check = wx.CheckBox(self, label="")
+        self.enable_check.SetValue(True)  # 默认勾选
+        self.enable_check.Bind(wx.EVT_CHECKBOX, self.on_enable_changed)
+        hbox1.Add(self.enable_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        
+        hbox1.Add(wx.StaticText(self, label=f"文件{self.index+1}:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         self.file_path = wx.TextCtrl(self, style=wx.TE_READONLY)
-        hbox.Add(self.file_path, 1, wx.EXPAND | wx.RIGHT, 5)
+        hbox1.Add(self.file_path, 1, wx.EXPAND | wx.RIGHT, 5)
         
         browse_btn = wx.Button(self, label="选择文件")
         browse_btn.Bind(wx.EVT_BUTTON, self.on_browse_file)
-        hbox.Add(browse_btn, 0, wx.RIGHT, 5)
+        hbox1.Add(browse_btn, 0, wx.RIGHT, 5)
         
-        hbox.Add(wx.StaticText(self, label="地址:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        hbox1.Add(wx.StaticText(self, label="地址:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
-        self.address = wx.TextCtrl(self, value="0x1000", size=(100, -1))
-        hbox.Add(self.address, 0, wx.RIGHT, 5)
+        self.address = wx.TextCtrl(self, value="", size=(100, -1))
+        hbox1.Add(self.address, 0, wx.RIGHT, 5)
         
-        remove_btn = wx.Button(self, label="×")
-        remove_btn.SetMinSize((30, 25))
+        vbox.Add(hbox1, 0, wx.EXPAND | wx.BOTTOM, 5)
+        
+        # 第二行：选项和删除按钮
+        hbox2 = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # 内部Flash复选框
+        self.internal_check = wx.CheckBox(self, label="内部bin文件")
+        self.internal_check.SetValue(True)  # 默认勾选
+        hbox2.Add(self.internal_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        
+        # 添加一个弹性空间，让删除按钮靠右
+        hbox2.AddStretchSpacer(1)
+        
+        # 删除按钮
+        remove_btn = wx.Button(self, label="删除")
+        remove_btn.SetMinSize((60, 25))
         remove_btn.SetForegroundColour(wx.RED)
         remove_btn.Bind(wx.EVT_BUTTON, lambda evt: self.on_remove_callback(self.index))
-        hbox.Add(remove_btn, 0)
+        hbox2.Add(remove_btn, 0)
         
-        self.SetSizer(hbox)
+        vbox.Add(hbox2, 0, wx.EXPAND)
+        
+        self.SetSizer(vbox)
     
     def on_browse_file(self, event):
         wildcard = "二进制文件 (*.bin)|*.bin|所有文件 (*.*)|*.*"
@@ -148,6 +174,11 @@ class FlashFileItem(wx.Panel):
         
         dialog.Destroy()
     
+    def on_enable_changed(self, event):
+        # 当启用状态改变时，通知父组件
+        if self.on_check_callback:
+            self.on_check_callback(self.index, self.enable_check.GetValue())
+    
     def get_file_info(self):
         path = self.file_path.GetValue().strip()
         addr = self.address.GetValue().strip()
@@ -157,7 +188,9 @@ class FlashFileItem(wx.Panel):
         
         return {
             'path': path,
-            'address': addr
+            'address': addr,
+            'enabled': self.enable_check.GetValue(),
+            'internal': self.internal_check.GetValue()
         }
     
     def set_file_info(self, file_info):
@@ -166,14 +199,21 @@ class FlashFileItem(wx.Panel):
             self.file_path.SetValue(file_info['path'])
         if 'address' in file_info:
             self.address.SetValue(file_info['address'])
+        if 'enabled' in file_info:
+            self.enable_check.SetValue(file_info['enabled'])
+        if 'internal' in file_info:
+            self.internal_check.SetValue(file_info['internal'])
 
 class CommandExecutor(threading.Thread):
     """执行命令的线程类"""
-    def __init__(self, cmd, output_queue, progress_queue):
+    def __init__(self, cmd, output_queue, progress_queue, tool_type="internal", progress_offset=0, callback=None):
         super().__init__()
         self.cmd = cmd
         self.output_queue = output_queue
         self.progress_queue = progress_queue
+        self.tool_type = tool_type  # "internal" 或 "external"
+        self.progress_offset = progress_offset  # 进度偏移量，用于多个烧录过程的进度合并
+        self.callback = callback  # 回调函数
         self._stop_event = threading.Event()
         self._user_stopped = False
         self._current_progress = 0
@@ -211,6 +251,9 @@ class CommandExecutor(threading.Thread):
         
     def run(self):
         try:
+            # 根据工具类型添加前缀
+            tool_prefix = "[内部]" if self.tool_type == "internal" else "[外部]"
+            
             self.process = subprocess.Popen(
                 self.cmd,
                 stdout=subprocess.PIPE,
@@ -228,7 +271,9 @@ class CommandExecutor(threading.Thread):
             
             # 发送初始状态
             try:
-                self.progress_queue.put((0, "准备烧录..."))
+                tool_name = "内部Flash" if self.tool_type == "internal" else "外部SPI Flash"
+                self.progress_queue.put((self.progress_offset, f"准备{tool_name}烧录..."))
+                self.output_queue.put(f"{tool_prefix} 执行命令: {self.cmd}\n")
             except:
                 pass
             
@@ -246,9 +291,14 @@ class CommandExecutor(threading.Thread):
                             pass
                     
                     try:
-                        self.progress_queue.put((0, "用户停止烧录"))
+                        tool_name = "内部Flash" if self.tool_type == "internal" else "外部SPI Flash"
+                        self.progress_queue.put((self.progress_offset, f"用户停止{tool_name}烧录"))
                     except:
                         pass
+                    
+                    # 调用回调函数，表示烧录被停止
+                    if self.callback:
+                        wx.CallAfter(self.callback, False, True)  # False表示失败，True表示用户停止
                     break
                     
                 line = self.process.stdout.readline()
@@ -256,8 +306,10 @@ class CommandExecutor(threading.Thread):
                     break
                     
                 if line:
+                    # 添加工具类型前缀
+                    prefixed_line = f"{tool_prefix} {line}"
                     try:
-                        self.output_queue.put(line)
+                        self.output_queue.put(prefixed_line)
                     except:
                         break
                     
@@ -267,7 +319,7 @@ class CommandExecutor(threading.Thread):
                         self._has_failure = True
                         self._failure_message = failure_detected
                         try:
-                            self.output_queue.put(f"\n检测到失败信息: {failure_detected}\n")
+                            self.output_queue.put(f"{tool_prefix} 检测到失败信息: {failure_detected}\n")
                         except:
                             pass
                     
@@ -275,10 +327,12 @@ class CommandExecutor(threading.Thread):
                     progress_info = self.parse_progress_and_status(line)
                     if progress_info:
                         progress, status = progress_info
-                        if progress > self._current_progress:
-                            self._current_progress = progress
+                        # 调整进度，考虑偏移量
+                        adjusted_progress = self.progress_offset + progress * (100 - self.progress_offset) / 100.0
+                        if adjusted_progress > self._current_progress:
+                            self._current_progress = adjusted_progress
                             try:
-                                self.progress_queue.put((progress, status))
+                                self.progress_queue.put((adjusted_progress, status))
                             except:
                                 pass
                         
@@ -291,33 +345,48 @@ class CommandExecutor(threading.Thread):
                 return
             
             # 根据烧录进度、返回码和失败信息判断结果
+            tool_name = "内部Flash" if self.tool_type == "internal" else "外部SPI Flash"
             if self._has_failure:
                 try:
-                    self.output_queue.put(f"\n烧录失败: {self._failure_message}，退出码: {return_code}\n")
-                    self.progress_queue.put((0, f"烧录失败: {self._failure_message}"))
+                    self.output_queue.put(f"{tool_prefix} 烧录失败: {self._failure_message}，退出码: {return_code}\n")
+                    self.progress_queue.put((self.progress_offset, f"{tool_name}烧录失败: {self._failure_message}"))
                 except:
                     pass
-            elif self._current_progress == 100:
+                # 调用回调函数，表示烧录失败
+                if self.callback:
+                    wx.CallAfter(self.callback, False, False)  # False表示失败，False表示不是用户停止
+            elif self._current_progress >= self.progress_offset + 95:  # 接近完成
                 try:
-                    self.output_queue.put(f"\n烧录成功完成，退出码: {return_code}\n")
-                    self.progress_queue.put((100, "烧录成功完成!"))
+                    self.output_queue.put(f"{tool_prefix} 烧录成功完成，退出码: {return_code}\n")
+                    self.progress_queue.put((self.progress_offset + 100, f"{tool_name}烧录成功完成!"))
                 except:
                     pass
-            elif self._current_progress > 0:
+                # 调用回调函数，表示烧录成功
+                if self.callback:
+                    wx.CallAfter(self.callback, True, False)  # True表示成功，False表示不是用户停止
+            elif self._current_progress > self.progress_offset:
                 try:
-                    self.output_queue.put(f"\n烧录未完成，进度: {self._current_progress}%，退出码: {return_code}\n")
-                    self.progress_queue.put((0, f"烧录未完成，进度: {self._current_progress}%"))
+                    self.output_queue.put(f"{tool_prefix} 烧录未完成，进度: {int(self._current_progress - self.progress_offset)}%，退出码: {return_code}\n")
+                    self.progress_queue.put((self.progress_offset, f"{tool_name}烧录未完成，进度: {int(self._current_progress - self.progress_offset)}%"))
                 except:
                     pass
+                # 调用回调函数，表示烧录部分完成
+                if self.callback:
+                    wx.CallAfter(self.callback, False, False)  # False表示失败，False表示不是用户停止
             else:
                 try:
-                    self.output_queue.put(f"\n烧录失败，退出码: {return_code}\n")
-                    self.progress_queue.put((0, f"烧录失败，退出码: {return_code}"))
+                    self.output_queue.put(f"{tool_prefix} 烧录失败，退出码: {return_code}\n")
+                    self.progress_queue.put((self.progress_offset, f"{tool_name}烧录失败，退出码: {return_code}"))
                 except:
                     pass
+                # 调用回调函数，表示烧录失败
+                if self.callback:
+                    wx.CallAfter(self.callback, False, False)  # False表示失败，False表示不是用户停止
             
         except Exception:
-            pass
+            # 异常情况下也调用回调函数
+            if self.callback:
+                wx.CallAfter(self.callback, False, False)  # False表示失败，False表示不是用户停止
     
     @staticmethod
     def check_for_failure(text):
@@ -479,12 +548,12 @@ class ProgressPanel(wx.Panel):
         # 统一的状态标签
         self.status_label = wx.StaticText(self, label="准备就绪")
         self.status_label.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        hbox.Add(self.status_label, 1, wx.ALIGN_CENTER_VERTICAL)
+        hbox.Add(self.status_label, 6, wx.ALIGN_CENTER_VERTICAL)
         
         # 时间标签
         self.time_label = wx.StaticText(self, label="耗时: --")
         self.time_label.SetForegroundColour(wx.Colour(100, 100, 100))
-        hbox.Add(self.time_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
+        hbox.Add(self.time_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
         
         vbox.Add(hbox, 0, wx.EXPAND | wx.ALL, 5)
         
@@ -493,7 +562,7 @@ class ProgressPanel(wx.Panel):
     
     def update_progress(self, value, status=None):
         try:
-            self.progress_bar.SetValue(value)
+            self.progress_bar.SetValue(int(value))
             
             # 启动计时器
             if self.start_time is None and value > 0:
@@ -502,7 +571,7 @@ class ProgressPanel(wx.Panel):
             # 更新耗时显示
             if self.start_time:
                 elapsed = time.time() - self.start_time
-                self.time_label.SetLabel(f"耗时: {elapsed:.1f}s")
+                self.time_label.SetLabel(f"耗时: {elapsed:.3f}s")
             
             # 更新状态显示
             if status:
@@ -514,10 +583,6 @@ class ProgressPanel(wx.Panel):
                     self.status_label.SetLabel("烧录完成")
                 else:
                     self.status_label.SetLabel(f"烧录中... {value}%")
-            
-            # 完成时重置计时器
-            if value == 100:
-                self.start_time = None
                 
         except wx.PyDeadObjectError:
             pass
@@ -547,7 +612,7 @@ class SerialPortPanel(wx.Panel):
         
         # 串口选择
         hbox1 = wx.BoxSizer(wx.HORIZONTAL)
-        hbox1.Add(wx.StaticText(self, label="串口:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        hbox1.Add(wx.StaticText(self, label="串   口:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         self.port_combo = wx.ComboBox(self, style=wx.CB_READONLY)
         hbox1.Add(self.port_combo, 1, wx.EXPAND | wx.RIGHT, 5)
@@ -583,6 +648,11 @@ class SerialPortPanel(wx.Panel):
         self.fast_link_check.SetValue(True)
         vbox.Add(self.fast_link_check, 0, wx.ALL, 5)
         
+        # 大端模式选项（仅内部Flash使用）
+        self.big_endian_check = wx.CheckBox(self, label="大端模式 (--big-endian)")
+        self.big_endian_check.SetValue(True)
+        vbox.Add(self.big_endian_check, 0, wx.ALL, 5)
+        
         self.SetSizer(vbox)
         self.refresh_ports()
     
@@ -617,7 +687,8 @@ class SerialPortPanel(wx.Panel):
                 'port': self.port_combo.GetValue(),
                 'baudrate': self.baudrate_combo.GetValue(),
                 'uart_type': self.uart_combo.GetValue(),
-                'fast_link': self.fast_link_check.GetValue()
+                'fast_link': self.fast_link_check.GetValue(),
+                'big_endian': self.big_endian_check.GetValue()
             }
         except wx.PyDeadObjectError:
             return {}
@@ -633,6 +704,8 @@ class SerialPortPanel(wx.Panel):
                 self.uart_combo.SetValue(config['uart_type'])
             if 'fast_link' in config:
                 self.fast_link_check.SetValue(config['fast_link'])
+            if 'big_endian' in config:
+                self.big_endian_check.SetValue(config['big_endian'])
         except wx.PyDeadObjectError:
             pass
     
@@ -652,10 +725,11 @@ class SerialPortPanel(wx.Panel):
             pass
 
 class FlashFilesPanel(wx.Panel):
-    """烧录文件配置面板"""
+    """烧录文件配置面板 - 支持滚动显示"""
     def __init__(self, parent):
         super().__init__(parent)
         self.file_items = []
+        self.max_files = 10  # 最大文件数量
         self.init_ui()
     
     def init_ui(self):
@@ -667,30 +741,56 @@ class FlashFilesPanel(wx.Panel):
         title.SetFont(wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         hbox_title.Add(title, 1, wx.ALIGN_CENTER_VERTICAL)
         
-        self.add_btn = wx.Button(self, label="添加文件")
-        self.add_btn.Bind(wx.EVT_BUTTON, self.on_add_file)
-        hbox_title.Add(self.add_btn, 0)
+        # 添加内部文件按钮
+        self.add_internal_btn = wx.Button(self, label="添加内部文件")
+        self.add_internal_btn.Bind(wx.EVT_BUTTON, lambda e: self.add_file_item(internal=True))
+        hbox_title.Add(self.add_internal_btn, 0, wx.RIGHT, 5)
+        
+        # 添加外部文件按钮
+        self.add_external_btn = wx.Button(self, label="添加外部文件")
+        self.add_external_btn.Bind(wx.EVT_BUTTON, lambda e: self.add_file_item(internal=False))
+        hbox_title.Add(self.add_external_btn, 0)
         
         vbox.Add(hbox_title, 0, wx.EXPAND | wx.ALL, 5)
         
-        # 文件列表容器
+        # 文件列表容器 - 使用ScrolledWindow支持滚动
+        self.scrolled_window = wx.ScrolledWindow(self)
+        self.scrolled_window.SetScrollRate(10, 10)
+        self.scrolled_window.SetMinSize((-1, 200))  # 设置最小高度
+        
         self.files_container = wx.BoxSizer(wx.VERTICAL)
-        vbox.Add(self.files_container, 1, wx.EXPAND | wx.ALL, 5)
+        self.scrolled_window.SetSizer(self.files_container)
+        
+        vbox.Add(self.scrolled_window, 1, wx.EXPAND | wx.ALL, 5)
+        
+        # 文件计数标签
+        self.file_count_label = wx.StaticText(self, label="文件数: 0/10")
+        vbox.Add(self.file_count_label, 0, wx.ALIGN_RIGHT | wx.RIGHT | wx.BOTTOM, 5)
         
         self.SetSizer(vbox)
-        # 默认添加一个文件
-        self.add_file_item()
+        # 默认添加一个内部文件
+        self.add_file_item(internal=True)
+        self.update_file_count()
     
-    def on_add_file(self, event):
-        self.add_file_item()
-    
-    def add_file_item(self):
+    def add_file_item(self, internal=True):
+        # 检查是否达到最大文件数
+        if len(self.file_items) >= self.max_files:
+            wx.MessageBox(f"最多只能添加{self.max_files}个文件", "提示", wx.OK | wx.ICON_INFORMATION)
+            return
+        
         index = len(self.file_items)
-        item = FlashFileItem(self, index, self.on_remove_file)
+        item = FlashFileItem(self.scrolled_window, index, self.on_remove_file, self.on_file_check_changed)
+        if not internal:
+            item.internal_check.SetValue(False)
         self.file_items.append(item)
         self.files_container.Add(item, 0, wx.EXPAND | wx.BOTTOM, 5)
-        self.Layout()
+        
+        # 调整滚动窗口大小
+        self.scrolled_window.SetVirtualSize(self.scrolled_window.GetBestVirtualSize())
+        self.scrolled_window.Layout()
+        
         wx.PostEvent(self, FlashFileAddedEvent())
+        self.update_file_count()
     
     def on_remove_file(self, index):
         if 0 <= index < len(self.file_items):
@@ -701,8 +801,23 @@ class FlashFilesPanel(wx.Panel):
             for i, item in enumerate(self.file_items):
                 item.index = i
             
-            self.Layout()
+            # 调整滚动窗口大小
+            self.scrolled_window.SetVirtualSize(self.scrolled_window.GetBestVirtualSize())
+            self.scrolled_window.Layout()
+            self.scrolled_window.Refresh()
+            
             wx.PostEvent(self, FlashFileRemovedEvent())
+            self.update_file_count()
+    
+    def on_file_check_changed(self, index, enabled):
+        """当文件勾选状态改变时的回调"""
+        # 这里可以添加额外的处理逻辑
+        pass
+    
+    def update_file_count(self):
+        """更新文件计数显示"""
+        count = len(self.file_items)
+        self.file_count_label.SetLabel(f"文件数: {count}/{self.max_files}")
     
     def get_files(self):
         files = []
@@ -712,6 +827,24 @@ class FlashFilesPanel(wx.Panel):
                 files.append(file_info)
         return files
     
+    def get_internal_files(self):
+        """获取内部Flash文件列表（已启用）"""
+        internal_files = []
+        for item in self.file_items:
+            file_info = item.get_file_info()
+            if file_info and file_info['enabled'] and file_info['internal']:
+                internal_files.append(file_info)
+        return internal_files
+    
+    def get_external_files(self):
+        """获取外部SPI Flash文件列表（已启用）"""
+        external_files = []
+        for item in self.file_items:
+            file_info = item.get_file_info()
+            if file_info and file_info['enabled'] and not file_info['internal']:
+                external_files.append(file_info)
+        return external_files
+    
     def set_files(self, files):
         """设置文件列表"""
         # 清空现有文件
@@ -719,22 +852,27 @@ class FlashFilesPanel(wx.Panel):
         
         # 添加新的文件项
         for file_info in files:
-            self.add_file_item()
+            internal = file_info.get('internal', True)
+            self.add_file_item(internal=internal)
             # 设置最后一个添加的文件项的信息
             if self.file_items:
                 self.file_items[-1].set_file_info(file_info)
         
         # 如果没有文件，添加一个空文件项
         if not files:
-            self.add_file_item()
+            self.add_file_item(internal=True)
         
-        self.Layout()
+        self.scrolled_window.SetVirtualSize(self.scrolled_window.GetBestVirtualSize())
+        self.scrolled_window.Layout()
+        self.update_file_count()
     
     def clear_files(self):
         for item in self.file_items:
             item.Destroy()
         self.file_items = []
-        self.Layout()
+        self.scrolled_window.SetVirtualSize(self.scrolled_window.GetBestVirtualSize())
+        self.scrolled_window.Layout()
+        self.update_file_count()
 
 class ControlPanel(wx.Panel):
     """控制面板 - 现在放在进度面板下面"""
@@ -754,17 +892,11 @@ class ControlPanel(wx.Panel):
         self.flash_btn.SetFont(wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         hbox.Add(self.flash_btn, 0, wx.RIGHT, 10)
         
-        # 停止按钮
+        # 停止按钮（原来的强制停止按钮）
         self.stop_btn = wx.Button(self, label="停止")
         self.stop_btn.SetMinSize((80, 40))
         self.stop_btn.Disable()
         hbox.Add(self.stop_btn, 0, wx.RIGHT, 10)
-        
-        # 强制停止按钮
-        self.force_stop_btn = wx.Button(self, label="强制停止")
-        self.force_stop_btn.SetMinSize((90, 40))
-        self.force_stop_btn.Disable()
-        hbox.Add(self.force_stop_btn, 0, wx.RIGHT, 10)
         
         # 添加一个可拉伸的空间，让后面的按钮靠右
         hbox.AddStretchSpacer(1)
@@ -819,16 +951,19 @@ class OutputPanel(wx.Panel):
 class BKLoaderApp(wx.Frame):
     """BK7236烧录工具主窗口"""
     def __init__(self):
-        super().__init__(None, title="BK7236 Flash烧录工具", size=(1000, 800))
+        super().__init__(None, title="BK7236 Flash烧录工具", size=(1000, 700))
         
-        self.executor_thread = None
+        self.internal_executor = None
+        self.external_executor = None
         self.output_queue = queue.Queue()
         self.progress_queue = queue.Queue()
         self.serial_monitor = None
         self._closing = False
+        self.current_flash_stage = None  # 当前烧录阶段: None, "internal", "external"
+        self.waiting_for_reboot = False  # 是否正在等待重启
         
         # 配置文件路径
-        self.config_file = os.path.join(os.path.expanduser("~"), ".bk7236_flasher_config.json")
+        self.config_file = os.path.join(os.path.expanduser("./"), ".bk7236_flasher_config.json")
         
         self.init_ui()
         self.setup_timer()
@@ -891,7 +1026,6 @@ class BKLoaderApp(wx.Frame):
         # 绑定按钮事件
         self.control_panel.flash_btn.Bind(wx.EVT_BUTTON, self.on_flash)
         self.control_panel.stop_btn.Bind(wx.EVT_BUTTON, self.on_stop)
-        self.control_panel.force_stop_btn.Bind(wx.EVT_BUTTON, self.on_force_stop)
         self.control_panel.clear_btn.Bind(wx.EVT_BUTTON, self.on_clear_output)
         self.control_panel.clear_files_btn.Bind(wx.EVT_BUTTON, self.on_clear_files)
         
@@ -907,107 +1041,19 @@ class BKLoaderApp(wx.Frame):
         load_config_item = file_menu.Append(wx.ID_OPEN, '加载配置\tCtrl+O', '加载配置文件')
         save_config_item = file_menu.Append(wx.ID_SAVE, '保存配置\tCtrl+S', '保存配置文件')
         file_menu.AppendSeparator()
-        
-        # 最近配置文件子菜单
-        recent_menu = wx.Menu()
-        self.recent_menu_items = []
-        for i in range(5):
-            item = recent_menu.Append(wx.ID_ANY, f'加载最近配置文件 {i+1}')
-            self.recent_menu_items.append(item)
-            recent_menu.Bind(wx.EVT_MENU, self.create_recent_menu_handler(i), item)
-        
-        file_menu.AppendSubMenu(recent_menu, '最近配置文件', '最近使用的配置文件')
-        file_menu.AppendSeparator()
-        
         exit_item = file_menu.Append(wx.ID_EXIT, '退出\tCtrl+Q', '退出程序')
         self.Bind(wx.EVT_MENU, self.on_load_config, load_config_item)
         self.Bind(wx.EVT_MENU, self.on_save_config, save_config_item)
         self.Bind(wx.EVT_MENU, self.on_close_menu, exit_item)
         menubar.Append(file_menu, '文件')
         
-        # 编辑菜单
-        edit_menu = wx.Menu()
-        add_file_item = edit_menu.Append(wx.ID_ANY, '添加文件\tCtrl+A', '添加烧录文件')
-        clear_files_item = edit_menu.Append(wx.ID_ANY, '清空文件\tCtrl+Shift+A', '清空所有文件')
-        edit_menu.AppendSeparator()
-        refresh_ports_item = edit_menu.Append(wx.ID_ANY, '刷新串口\tF5', '刷新串口列表')
-        self.Bind(wx.EVT_MENU, lambda e: self.files_panel.on_add_file(e), add_file_item)
-        self.Bind(wx.EVT_MENU, lambda e: self.files_panel.clear_files(), clear_files_item)
-        self.Bind(wx.EVT_MENU, lambda e: self.serial_panel.refresh_ports(), refresh_ports_item)
-        menubar.Append(edit_menu, '编辑')
-        
         # 工具菜单
         tool_menu = wx.Menu()
-        auto_detect_item = tool_menu.Append(wx.ID_ANY, '自动检测设备', '自动检测连接的设备')
-        reset_item = tool_menu.Append(wx.ID_ANY, '重置设备', '发送重置信号')
-        tool_menu.AppendSeparator()
         about_item = tool_menu.Append(wx.ID_ABOUT, '关于', '关于此工具')
-        self.Bind(wx.EVT_MENU, self.on_auto_detect, auto_detect_item)
-        self.Bind(wx.EVT_MENU, self.on_reset_device, reset_item)
         self.Bind(wx.EVT_MENU, self.on_about, about_item)
         menubar.Append(tool_menu, '工具')
         
         self.SetMenuBar(menubar)
-        
-        # 更新最近文件菜单
-        self.update_recent_menu()
-    
-    def create_recent_menu_handler(self, index):
-        """创建最近文件菜单项的事件处理器"""
-        def handler(event):
-            self.load_recent_config(index)
-        return handler
-    
-    def update_recent_menu(self):
-        """更新最近文件菜单"""
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
-                
-                recent_files = config_data.get('recent_files', [])
-                
-                for i, item in enumerate(self.recent_menu_items):
-                    if i < len(recent_files):
-                        file_path = recent_files[i]
-                        file_name = os.path.basename(file_path)
-                        item.SetText(f"{i+1}: {file_name}")
-                        item.Enable(True)
-                    else:
-                        item.SetText(f"空")
-                        item.Enable(False)
-        except Exception:
-            pass
-    
-    def add_to_recent_files(self, file_path):
-        """添加文件到最近文件列表"""
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
-            else:
-                config_data = {}
-            
-            recent_files = config_data.get('recent_files', [])
-            
-            # 移除重复项
-            if file_path in recent_files:
-                recent_files.remove(file_path)
-            
-            # 添加到开头
-            recent_files.insert(0, file_path)
-            
-            # 只保留最近的5个文件
-            recent_files = recent_files[:5]
-            
-            config_data['recent_files'] = recent_files
-            
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=2, ensure_ascii=False)
-            
-            self.update_recent_menu()
-        except Exception as e:
-            print(f"更新最近文件列表失败: {e}")
     
     def load_last_config(self):
         """加载上次的配置"""
@@ -1089,24 +1135,25 @@ class BKLoaderApp(wx.Frame):
         # 停止串口监控线程
         if self.serial_monitor:
             self.serial_monitor.stop()
-            self.serial_monitor.join(timeout=2)
+            self.serial_monitor.join(timeout=0.5)
             self.serial_monitor = None
         
         # 停止烧录线程
-        if self.executor_thread and self.executor_thread.is_alive():
-            self.executor_thread.stop()
-            self.executor_thread.join(timeout=2)
-            
-            if self.executor_thread.is_alive():
-                try:
-                    bk_pids = ProcessManager.find_processes_by_name("bk_loader")
-                    for pid in bk_pids:
-                        try:
-                            ProcessManager.kill_process_tree(pid)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+        for executor in [self.internal_executor, self.external_executor]:
+            if executor and executor.is_alive():
+                executor.stop()
+                executor.join(timeout=0.5)
+                
+                if executor.is_alive():
+                    try:
+                        bk_pids = ProcessManager.find_processes_by_name("bk_loader")
+                        for pid in bk_pids:
+                            try:
+                                ProcessManager.kill_process_tree(pid)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
         
         # 清空队列
         try:
@@ -1192,6 +1239,10 @@ class BKLoaderApp(wx.Frame):
                 self.output_panel.append_text(text, wx.Colour(255, 140, 0))
             elif "正在停止" in text_lower:
                 self.output_panel.append_text(text, wx.Colour(255, 87, 34))
+            elif "[内部]" in text:
+                self.output_panel.append_text(text, wx.Colour(0, 0, 180))  # 蓝色
+            elif "[外部]" in text:
+                self.output_panel.append_text(text, wx.Colour(180, 0, 180))  # 紫色
             else:
                 self.output_panel.append_text(text)
         except wx.PyDeadObjectError:
@@ -1236,27 +1287,79 @@ class BKLoaderApp(wx.Frame):
                 self.progress_panel.update_progress(0, f"烧录错误，返回码: {event.data}")
                 self.output_panel.append_text(f"\n✗ 烧录错误，返回码: {event.data}\n", wx.RED)
             
-            self.control_panel.flash_btn.Enable()
-            self.control_panel.stop_btn.Disable()
-            self.control_panel.force_stop_btn.Disable()
+            self.reset_buttons()
         except wx.PyDeadObjectError:
             pass
     
-    def build_command(self):
+    def reset_buttons(self):
+        """重置按钮状态到正常状态"""
+        try:
+            self.control_panel.flash_btn.Enable()
+            self.control_panel.stop_btn.Disable()
+            self.current_flash_stage = None
+            self.waiting_for_reboot = False
+        except wx.PyDeadObjectError:
+            pass
+    
+    def build_internal_command(self):
+        """构建内部Flash烧录命令"""
         if self._closing:
             return None
             
         try:
             serial_config = self.serial_panel.get_config()
-            files = self.files_panel.get_files()
+            internal_files = self.files_panel.get_internal_files()
             
             if not serial_config.get('port'):
                 wx.MessageBox("请选择串口", "错误", wx.OK | wx.ICON_ERROR)
                 return None
             
-            if not files:
-                wx.MessageBox("请至少添加一个烧录文件", "错误", wx.OK | wx.ICON_ERROR)
+            if not internal_files:
+                return None  # 没有内部文件需要烧录
+            
+            cmd_parts = ["bk_loader.exe", "download"]
+            
+            port_num = serial_config['port'].replace("COM", "")
+            cmd_parts.extend(["-p", port_num])
+            
+            cmd_parts.extend(["-b", serial_config['baudrate']])
+            
+            cmd_parts.extend(["--uart-type", serial_config['uart_type']])
+            
+            cmd_parts.append("--mainBin-multi")
+            
+            # 构建文件地址列表
+            file_parts = []
+            for file_info in internal_files:
+                file_parts.append(f"{file_info['path']}@{file_info['address']}")
+            
+            cmd_parts.append(",".join(file_parts))
+            
+            if serial_config['big_endian']:
+                cmd_parts.append("--big-endian")
+            
+            if serial_config['fast_link']:
+                cmd_parts.extend(["--fast-link", "1"])
+            
+            return " ".join(cmd_parts)
+        except wx.PyDeadObjectError:
+            return None
+    
+    def build_external_command(self):
+        """构建外部SPI Flash烧录命令"""
+        if self._closing:
+            return None
+            
+        try:
+            serial_config = self.serial_panel.get_config()
+            external_files = self.files_panel.get_external_files()
+            
+            if not serial_config.get('port'):
+                wx.MessageBox("请选择串口", "错误", wx.OK | wx.ICON_ERROR)
                 return None
+            
+            if not external_files:
+                return None  # 没有外部文件需要烧录
             
             cmd_parts = ["bk_loader_nor_ver.exe", "download"]
             
@@ -1267,8 +1370,10 @@ class BKLoaderApp(wx.Frame):
             
             cmd_parts.extend(["--uart-type", serial_config['uart_type']])
             
-            for file_info in files:
-                cmd_parts.append("--mainBin-multi")
+            cmd_parts.append("--mainBin-multi")
+            
+            # 构建文件地址列表
+            for file_info in external_files:
                 cmd_parts.append(f"{file_info['path']}@{file_info['address']}")
             
             if serial_config['fast_link']:
@@ -1282,8 +1387,12 @@ class BKLoaderApp(wx.Frame):
         if self._closing:
             return
             
-        cmd = self.build_command()
-        if cmd is None:
+        # 获取内部和外部文件
+        internal_files = self.files_panel.get_internal_files()
+        external_files = self.files_panel.get_external_files()
+        
+        if not internal_files and not external_files:
+            wx.MessageBox("请至少勾选一个文件进行烧录", "错误", wx.OK | wx.ICON_ERROR)
             return
         
         try:
@@ -1292,43 +1401,134 @@ class BKLoaderApp(wx.Frame):
             
             self.control_panel.flash_btn.Disable()
             self.control_panel.stop_btn.Enable()
-            self.control_panel.force_stop_btn.Enable()
             
-            self.output_panel.append_text(f"执行命令: {cmd}\n", wx.Colour(0, 0, 255))
+            self.output_panel.append_text("="*80 + "\n")
+            self.output_panel.append_text("开始烧录流程...\n", wx.Colour(0, 0, 255))
+            self.output_panel.append_text(f"内部Flash文件数: {len(internal_files)}\n")
+            self.output_panel.append_text(f"外部SPI Flash文件数: {len(external_files)}\n")
             self.output_panel.append_text("="*80 + "\n")
             
-            self.executor_thread = CommandExecutor(cmd, self.output_queue, self.progress_queue)
-            self.executor_thread.start()
+            self.start_time = None
+            
+            # 先烧录内部Flash
+            if internal_files:
+                self.current_flash_stage = "internal"
+                internal_cmd = self.build_internal_command()
+                if internal_cmd:
+                    self.internal_executor = CommandExecutor(
+                        internal_cmd, 
+                        self.output_queue, 
+                        self.progress_queue,
+                        tool_type="internal",
+                        progress_offset=0,
+                        callback=self.on_internal_completed  # 设置回调函数
+                    )
+                    self.internal_executor.start()
+                else:
+                    self.on_internal_completed(False, False)
+            else:
+                self.on_internal_completed(True, False)  # 没有内部文件，直接开始外部烧录
+            
         except wx.PyDeadObjectError:
             pass
+    
+    def on_internal_completed(self, success=True, user_stopped=False):
+        """内部Flash烧录完成回调"""
+        if user_stopped:
+            # 用户停止了烧录
+            self.output_panel.append_text("\n内部Flash烧录已停止\n", wx.Colour(255, 87, 34))
+            self.reset_buttons()
+            return
+        
+        if not success:
+            # 内部烧录失败，停止整个流程
+            self.output_panel.append_text("\n内部Flash烧录失败，停止外部Flash烧录\n", wx.RED)
+            self.reset_buttons()
+            return
+        
+        # 检查是否有外部文件需要烧录
+        external_files = self.files_panel.get_external_files()
+        
+        if external_files:
+            # 如果有内部文件和外部文件都需要烧录，等待5秒让设备重启
+            internal_files = self.files_panel.get_internal_files()
+            if internal_files and external_files:
+                self.output_panel.append_text("\n" + "="*80 + "\n", wx.Colour(0, 0, 180))
+                self.output_panel.append_text("内部Flash烧录完成，等待5秒设备重启...\n", wx.Colour(0, 0, 180))
+                self.output_panel.append_text("="*80 + "\n", wx.Colour(0, 0, 180))
+                
+                self.waiting_for_reboot = True
+                wx.CallLater(5000, self.start_external_flash)
+            else:
+                # 只有外部文件，直接开始
+                self.start_external_flash()
+        else:
+            # 没有外部文件，完成整个流程
+            self.output_panel.append_text("\n✓ 所有烧录任务完成!\n", wx.Colour(0, 128, 0))
+            self.reset_buttons()
+    
+    def start_external_flash(self):
+        """开始外部Flash烧录"""
+        self.waiting_for_reboot = False
+        self.output_panel.append_text("\n" + "="*80 + "\n", wx.Colour(180, 0, 180))
+        self.output_panel.append_text("开始外部SPI Flash烧录...\n", wx.Colour(180, 0, 180))
+        self.output_panel.append_text("="*80 + "\n", wx.Colour(180, 0, 180))
+        
+        self.current_flash_stage = "external"
+        external_cmd = self.build_external_command()
+        if external_cmd:
+            self.external_executor = CommandExecutor(
+                external_cmd, 
+                self.output_queue, 
+                self.progress_queue,
+                tool_type="external",
+                progress_offset=0,  # 外部烧录从50%开始
+                callback=self.on_external_completed  # 设置回调函数
+            )
+            self.external_executor.start()
+        else:
+            print("外部烧录命令构建失败")
+            self.on_external_completed(False, False)
+    
+    def on_external_completed(self, success=True, user_stopped=False):
+        """外部SPI Flash烧录完成回调"""
+        if user_stopped:
+            # 用户停止了烧录
+            self.output_panel.append_text("\n外部SPI Flash烧录已停止\n", wx.Colour(255, 87, 34))
+            self.reset_buttons()
+            return
+        
+        if success:
+            self.output_panel.append_text("\n✓ 外部SPI Flash烧录完成!\n", wx.Colour(0, 128, 0))
+        else:
+            self.output_panel.append_text("\n✗ 外部SPI Flash烧录失败\n", wx.RED)
+        
+        self.output_panel.append_text("\n" + "="*80 + "\n")
+        self.output_panel.append_text("烧录流程结束\n")
+        self.output_panel.append_text("="*80 + "\n")
+        
+        self.reset_buttons()
     
     def on_stop(self, event):
-        if self._closing or not self.executor_thread or not self.executor_thread.is_alive():
+        if self._closing:
             return
             
         try:
-            self.output_panel.append_text("\n正在停止烧录...\n", wx.Colour(255, 140, 0))
-            self.progress_panel.status_label.SetLabel("正在停止...")
+            self.output_panel.append_text("\n正在停止烧录...\n", wx.Colour(255, 87, 34))
+            self.progress_panel.status_label.SetLabel("停止中...")
             
-            self.executor_thread.stop()
+            # 停止当前烧录阶段的线程
+            if self.current_flash_stage == "internal" and self.internal_executor and self.internal_executor.is_alive():
+                self.internal_executor.stop()
+            elif self.current_flash_stage == "external" and self.external_executor and self.external_executor.is_alive():
+                self.external_executor.stop()
+            elif self.waiting_for_reboot:
+                # 如果在等待重启阶段，直接停止
+                self.output_panel.append_text("已取消等待重启\n", wx.Colour(255, 87, 34))
+                self.waiting_for_reboot = False
+                self.reset_buttons()
             
-            self.control_panel.stop_btn.Disable()
-            self.control_panel.force_stop_btn.Disable()
-        except wx.PyDeadObjectError:
-            pass
-    
-    def on_force_stop(self, event):
-        if self._closing or not self.executor_thread or not self.executor_thread.is_alive():
-            return
-            
-        try:
-            self.output_panel.append_text("\n正在强制停止烧录...\n", wx.Colour(255, 87, 34))
-            self.progress_panel.status_label.SetLabel("强制停止中...")
-            
-            self.executor_thread.stop()
-            
-            time.sleep(0.5)
-            
+            # 强制停止所有相关进程
             try:
                 bk_pids = ProcessManager.find_processes_by_name("bk_loader")
                 for pid in bk_pids:
@@ -1340,24 +1540,17 @@ class BKLoaderApp(wx.Frame):
             except Exception:
                 pass
             
-            self.control_panel.stop_btn.Disable()
-            self.control_panel.force_stop_btn.Disable()
-            
-            wx.CallLater(1000, self.on_force_stop_completed)
+            wx.CallLater(1000, self.on_stop_completed)
         except wx.PyDeadObjectError:
             pass
     
-    def on_force_stop_completed(self):
+    def on_stop_completed(self):
         if self._closing:
             return
             
         try:
-            self.progress_panel.update_progress(0, "已强制停止")
-            self.output_panel.append_text("\n⚠ 已强制停止烧录\n", wx.Colour(255, 87, 34))
-            
-            self.control_panel.flash_btn.Enable()
-            self.control_panel.stop_btn.Disable()
-            self.control_panel.force_stop_btn.Disable()
+            self.progress_panel.update_progress(0, "已停止")
+            self.output_panel.append_text("\n⚠ 已停止烧录\n", wx.Colour(255, 87, 34))
         except wx.PyDeadObjectError:
             pass
     
@@ -1368,7 +1561,7 @@ class BKLoaderApp(wx.Frame):
     def on_clear_files(self, event):
         if not self._closing:
             self.files_panel.clear_files()
-            self.files_panel.add_file_item()
+            self.files_panel.add_file_item(internal=True)
     
     def on_load_config(self, event):
         wildcard = "配置文件 (*.json)|*.json|所有文件 (*.*)|*.*"
@@ -1383,39 +1576,11 @@ class BKLoaderApp(wx.Frame):
                 
                 self.apply_config(config)
                 
-                # 添加到最近文件列表
-                self.add_to_recent_files(file_path)
-                
                 wx.MessageBox(f"配置加载成功!\n文件: {os.path.basename(file_path)}", "提示", wx.OK | wx.ICON_INFORMATION)
             except Exception as e:
                 wx.MessageBox(f"加载配置失败: {e}", "错误", wx.OK | wx.ICON_ERROR)
         
         dialog.Destroy()
-    
-    def load_recent_config(self, index):
-        """加载最近配置文件"""
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
-                
-                recent_files = config_data.get('recent_files', [])
-                
-                if index < len(recent_files):
-                    file_path = recent_files[index]
-                    
-                    if os.path.exists(file_path):
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            config = json.load(f)
-                        
-                        self.apply_config(config)
-                        wx.MessageBox(f"已加载配置文件: {os.path.basename(file_path)}", "提示", wx.OK | wx.ICON_INFORMATION)
-                    else:
-                        wx.MessageBox(f"配置文件不存在: {file_path}", "错误", wx.OK | wx.ICON_ERROR)
-                else:
-                    wx.MessageBox("没有可用的最近配置文件", "提示", wx.OK | wx.ICON_INFORMATION)
-        except Exception as e:
-            wx.MessageBox(f"加载最近配置失败: {e}", "错误", wx.OK | wx.ICON_ERROR)
     
     def on_save_config(self, event):
         wildcard = "配置文件 (*.json)|*.json"
@@ -1452,32 +1617,17 @@ class BKLoaderApp(wx.Frame):
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump(config, f, indent=2, ensure_ascii=False)
                 
-                # 添加到最近文件列表
-                self.add_to_recent_files(file_path)
-                
                 wx.MessageBox(f"配置保存成功!\n文件: {os.path.basename(file_path)}", "提示", wx.OK | wx.ICON_INFORMATION)
             except Exception as e:
                 wx.MessageBox(f"保存配置失败: {e}", "错误", wx.OK | wx.ICON_ERROR)
         
         dialog.Destroy()
     
-    def on_auto_detect(self, event):
-        self.serial_panel.refresh_ports()
-        wx.MessageBox("串口列表已刷新", "提示", wx.OK | wx.ICON_INFORMATION)
-    
-    def on_reset_device(self, event):
-        serial_config = self.serial_panel.get_config()
-        if not serial_config['port']:
-            wx.MessageBox("请先选择串口", "错误", wx.OK | wx.ICON_ERROR)
-            return
-        
-        wx.MessageBox("重置功能尚未实现", "提示", wx.OK | wx.ICON_INFORMATION)
-    
     def on_about(self, event):
         info = wx.adv.AboutDialogInfo()
         info.SetName("BK7236 Flash烧录工具")
-        info.SetVersion("1.0.0")
-        info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持多文件烧录和实时进度显示")
+        info.SetVersion("1.2.0")
+        info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持内部Flash和外部SPI Flash烧录\n支持多文件烧录和实时进度显示")
         info.SetCopyright("© 2024")
         info.AddDeveloper("开发者")
         
