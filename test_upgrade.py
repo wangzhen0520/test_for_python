@@ -10,8 +10,10 @@ import sys
 import serial
 import serial.tools.list_ports
 import time
+import signal
+import psutil  # 需要安装：pip install psutil
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 # 定义自定义事件
 (ProgressUpdateEvent, EVT_PROGRESS_UPDATE) = wx.lib.newevent.NewEvent()
@@ -20,6 +22,57 @@ from typing import List, Dict, Tuple
 (SerialPortsUpdateEvent, EVT_SERIAL_PORTS_UPDATE) = wx.lib.newevent.NewEvent()
 (FlashFileAddedEvent, EVT_FLASH_FILE_ADDED) = wx.lib.newevent.NewEvent()
 (FlashFileRemovedEvent, EVT_FLASH_FILE_REMOVED) = wx.lib.newevent.NewEvent()
+
+class ProcessManager:
+    """进程管理类，用于快速停止进程"""
+    @staticmethod
+    def kill_process_tree(pid):
+        """终止进程及其所有子进程"""
+        try:
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+            
+            # 先终止子进程
+            for child in children:
+                try:
+                    child.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+            
+            # 终止父进程
+            try:
+                parent.terminate()
+            except psutil.NoSuchProcess:
+                pass
+            
+            # 等待进程结束
+            gone, alive = psutil.wait_procs([parent] + children, timeout=3)
+            
+            # 强制杀死仍然存活的进程
+            for p in alive:
+                try:
+                    p.kill()
+                except psutil.NoSuchProcess:
+                    pass
+                    
+        except (psutil.NoSuchProcess, ProcessLookupError):
+            pass
+    
+    @staticmethod
+    def find_processes_by_name(name):
+        """根据进程名查找进程"""
+        processes = []
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                if proc.info['name'] and name in proc.info['name']:
+                    processes.append(proc.info['pid'])
+                elif proc.info['cmdline']:
+                    cmdline = ' '.join(proc.info['cmdline'])
+                    if name in cmdline:
+                        processes.append(proc.info['pid'])
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        return processes
 
 class SerialPortMonitor(threading.Thread):
     """串口监控线程，检测热插拔"""
@@ -120,14 +173,44 @@ class CommandExecutor(threading.Thread):
         self.output_queue = output_queue
         self.progress_queue = progress_queue
         self._stop_event = threading.Event()
+        self._user_stopped = False
+        self._current_progress = 0
+        self._last_progress_update = 0
+        self._has_failure = False
+        self._failure_message = ""
+        self.process = None
+        self.process_pid = None
         self.daemon = True
         
     def stop(self):
+        """停止命令执行"""
         self._stop_event.set()
+        self._user_stopped = True
+        
+        # 立即终止进程
+        if self.process and self.process.poll() is None:
+            try:
+                self.output_queue.put("正在停止进程...\n")
+                
+                # 使用进程管理器终止进程树
+                if self.process_pid:
+                    ProcessManager.kill_process_tree(self.process_pid)
+                else:
+                    self.process.terminate()
+                    
+                # 等待进程结束，但设置超时
+                try:
+                    self.process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+                    
+            except Exception as e:
+                self.output_queue.put(f"停止进程时出错: {str(e)}\n")
         
     def run(self):
         try:
-            process = subprocess.Popen(
+            self.process = subprocess.Popen(
                 self.cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -140,65 +223,181 @@ class CommandExecutor(threading.Thread):
                 shell=True
             )
             
+            # 保存进程ID用于终止进程树
+            self.process_pid = self.process.pid
+            
+            # 读取输出并解析进度
             while True:
                 if self._stop_event.is_set():
-                    process.terminate()
+                    # 用户主动停止，确保进程已终止
+                    if self.process and self.process.poll() is None:
+                        try:
+                            self.process.terminate()
+                            try:
+                                self.process.wait(timeout=0.5)
+                            except subprocess.TimeoutExpired:
+                                self.process.kill()
+                                self.process.wait()
+                        except Exception as e:
+                            self.output_queue.put(f"终止进程时出错: {str(e)}\n")
+                    
+                    # 用户主动停止
+                    self.progress_queue.put(("stopped", 1))
+                    self.output_queue.put("\n用户主动停止烧录\n")
                     break
                     
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
+                # 使用select实现超时读取，以便能够快速响应停止请求
+                try:
+                    # 检查进程是否已结束
+                    if self.process.poll() is not None:
+                        break
                     
-                if line:
+                    # 尝试读取一行输出
+                    line = self.process.stdout.readline()
+                    if not line:
+                        # 如果没有输出，但进程还在运行，则继续等待
+                        time.sleep(0.1)
+                        continue
+                    
+                    # 处理输出
                     self.output_queue.put(line)
+                    
+                    # 检查是否有失败信息
+                    failure_detected = self.check_for_failure(line)
+                    if failure_detected:
+                        self._has_failure = True
+                        self._failure_message = failure_detected
+                        self.output_queue.put(f"\n检测到失败信息: {failure_detected}\n")
                     
                     # 解析烧录进度
                     progress = self.parse_flash_progress(line)
-                    if progress is not None:
+                    if progress is not None and progress > self._current_progress:
+                        self._current_progress = progress
                         self.progress_queue.put(progress)
+                        
+                        # 记录进度更新时间
+                        self._last_progress_update = time.time()
+                        
+                except Exception as e:
+                    if not self._stop_event.is_set():
+                        self.output_queue.put(f"读取输出时出错: {str(e)}\n")
+                    break
             
-            return_code = process.wait()
-            self.output_queue.put(f"\n进程执行完成，退出码: {return_code}")
-            self.progress_queue.put(("completed", return_code))
+            # 等待进程完全结束
+            return_code = self.process.wait()
+            
+            # 如果用户已经停止，不再发送其他状态
+            if self._user_stopped:
+                return
+            
+            # 根据烧录进度、返回码和失败信息判断结果
+            if self._has_failure:
+                # 检测到失败信息，标记为失败
+                self.output_queue.put(f"\n烧录失败: {self._failure_message}，退出码: {return_code}\n")
+                self.progress_queue.put(("failure", 1))
+            elif self._current_progress == 100:
+                # 烧录完成且进度为100，标记为成功
+                self.output_queue.put(f"\n烧录成功完成，退出码: {return_code}\n")
+                self.progress_queue.put(("completed", 0))
+            elif self._current_progress > 0:
+                # 烧录进度大于0但未完成，标记为部分完成
+                self.output_queue.put(f"\n烧录未完成，进度: {self._current_progress}%，退出码: {return_code}\n")
+                self.progress_queue.put(("partial", 1))
+            else:
+                # 烧录进度为0，标记为失败
+                self.output_queue.put(f"\n烧录失败，退出码: {return_code}\n")
+                self.progress_queue.put(("error", return_code if return_code != 0 else 1))
             
         except Exception as e:
-            self.output_queue.put(f"执行错误: {str(e)}")
-            self.progress_queue.put(("error", str(e)))
+            if not self._user_stopped:
+                self.output_queue.put(f"执行错误: {str(e)}\n")
+                self.progress_queue.put(("error", 1))
+    
+    @staticmethod
+    def check_for_failure(text):
+        """检查输出中是否包含失败信息"""
+        text = text.strip()
+        
+        failure_patterns = [
+            (r'connect failed', "串口连接失败"),
+            (r'Connect device fail!', "设备连接失败"),
+            (r'Writing Flash Failed', "Flash写入失败"),
+            (r'EraseFlash ->fail', "Flash擦除失败"),
+            (r'WriteFlash ->fail', "Flash写入失败"),
+            (r'Timeout', "操作超时"),
+            (r'Not found', "未找到设备或文件"),
+            (r'Error:', "错误信息"),
+            (r'error:', "错误信息"),
+            (r'Failed', "失败"),
+            (r'failed', "失败"),
+            (r'无效', "无效操作或参数"),
+            (r'不支持', "不支持的操作"),
+        ]
+        
+        for pattern, message in failure_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                # 提取更具体的错误信息
+                lines = text.split('\n')
+                for line in lines:
+                    if re.search(pattern, line, re.IGNORECASE):
+                        return line.strip()
+        
+        return None
     
     @staticmethod
     def parse_flash_progress(text):
         """解析烧录进度"""
         text = text.strip()
         
+        # 如果包含失败信息，不更新进度
+        if CommandExecutor.check_for_failure(text):
+            return None
+        
+        # 匹配连接成功
+        if "connect success" in text:
+            return 5
+        
         # 匹配擦除进度
         if "EraseFlash" in text:
-            return 20
+            return 10
+        elif "Start 4K Erase" in text:
+            return 15
         elif "End 4K Erase" in text:
-            return 30
+            return 20
+        elif "Start 64K Erase" in text:
+            return 25
         elif "End 64K Erase" in text:
-            return 40
+            return 30
         elif "EraseFlash ->pass" in text:
-            return 50
+            return 40
         
         # 匹配写入进度
         if "Begin write to flash" in text:
-            return 60
-        elif "WriteFlash ->pass" in text:
-            return 90
+            return 50
         
-        # 匹配文件大小进度
+        # 匹配文件大小信息，用于计算写入进度
         file_write_pattern = r'file_length : 0x[0-9a-f]+ \((\d+) KB\)'
         match = re.search(file_write_pattern, text)
         if match:
             file_size_kb = int(match.group(1))
             if file_size_kb > 0:
-                # 这里可以根据实际写入进度动态计算
-                return 70
+                return 60
         
-        # 匹配完成
-        if "Writing Flash OK" in text:
+        # 匹配写入完成
+        if "WriteFlash ->pass" in text:
+            return 90
+        
+        # 匹配保护操作
+        if "Enprotect pass" in text or "Protect Flash" in text:
+            return 95
+        
+        # 匹配完成标志
+        if "Writing Flash OK" in text or "All Finished Successfully" in text:
             return 100
-        elif "All Finished Successfully" in text:
+        
+        # 匹配总耗时（意味着完成）
+        total_time_pattern = r'Total Test Time : \d+\.\d+ s'
+        if re.search(total_time_pattern, text):
             return 100
         
         return None
@@ -230,6 +429,9 @@ class ProgressPanel(wx.Panel):
         self.time_label = wx.StaticText(self, label="耗时: --")
         hbox.Add(self.time_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
         
+        self.status_label = wx.StaticText(self, label="状态: 空闲")
+        hbox.Add(self.status_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
+        
         vbox.Add(hbox, 0, wx.EXPAND | wx.ALL, 5)
         
         self.SetSizer(vbox)
@@ -243,15 +445,25 @@ class ProgressPanel(wx.Panel):
         
         if self.start_time:
             elapsed = time.time() - self.start_time
-            self.time_label.SetLabel(f"耗时: {elapsed:.1f}s")
+            self.time_label.SetLabel(f"耗时: {elapsed:.3f}s")
         
         if status:
             self.progress_label.SetLabel(status)
+            self.status_label.SetLabel(f"状态: {status}")
         else:
             self.progress_label.SetLabel(f"进度: {value}%")
-        
-        if value == 100:
-            self.start_time = None
+            if value == 100:
+                self.status_label.SetLabel("状态: 完成")
+            elif value > 0:
+                self.status_label.SetLabel("状态: 烧录中")
+    
+    def reset(self):
+        """重置进度面板"""
+        self.progress_bar.SetValue(0)
+        self.progress_label.SetLabel("准备就绪")
+        self.time_label.SetLabel("耗时: --")
+        self.status_label.SetLabel("状态: 空闲")
+        self.start_time = None
 
 class SerialPortPanel(wx.Panel):
     """串口配置面板"""
@@ -296,7 +508,7 @@ class SerialPortPanel(wx.Panel):
         hbox3.Add(wx.StaticText(self, label="UART类型:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         self.uart_combo = wx.ComboBox(self, value="CH340", 
-                                     choices=["CH340"])
+                                     choices=["CH340", "CP2102", "FT232", "PL2303", "其他"])
         hbox3.Add(self.uart_combo, 0, wx.RIGHT, 5)
         
         vbox.Add(hbox3, 0, wx.EXPAND | wx.ALL, 5)
@@ -449,7 +661,17 @@ class ControlPanel(wx.Panel):
         self.stop_btn = wx.Button(self, label="停止")
         self.stop_btn.SetMinSize((80, 40))
         self.stop_btn.Disable()
+        self.stop_btn.SetBackgroundColour(wx.Colour(244, 67, 54))  # 红色
+        self.stop_btn.SetForegroundColour(wx.WHITE)
         hbox.Add(self.stop_btn, 0, wx.RIGHT, 10)
+        
+        # 强制停止按钮
+        self.force_stop_btn = wx.Button(self, label="强制停止")
+        self.force_stop_btn.SetMinSize((80, 40))
+        self.force_stop_btn.Disable()
+        self.force_stop_btn.SetBackgroundColour(wx.Colour(255, 87, 34))  # 橙色
+        self.force_stop_btn.SetForegroundColour(wx.WHITE)
+        hbox.Add(self.force_stop_btn, 0, wx.RIGHT, 10)
         
         # 清空输出按钮
         self.clear_btn = wx.Button(self, label="清空输出")
@@ -500,9 +722,9 @@ class OutputPanel(wx.Panel):
         self.output_text.Clear()
 
 class BKLoaderApp(wx.Frame):
-    """BK7258 SPI Flash烧录工具主窗口"""
+    """BK7236烧录工具主窗口"""
     def __init__(self):
-        super().__init__(None, title="BK7258 SPI Flash烧录工具", size=(1000, 800))
+        super().__init__(None, title="BK7236 Flash烧录工具", size=(1000, 800))
         
         self.executor_thread = None
         self.output_queue = queue.Queue()
@@ -556,6 +778,7 @@ class BKLoaderApp(wx.Frame):
         self.control_panel = ControlPanel(main_panel)
         self.control_panel.flash_btn.Bind(wx.EVT_BUTTON, self.on_flash)
         self.control_panel.stop_btn.Bind(wx.EVT_BUTTON, self.on_stop)
+        self.control_panel.force_stop_btn.Bind(wx.EVT_BUTTON, self.on_force_stop)
         self.control_panel.clear_btn.Bind(wx.EVT_BUTTON, self.on_clear_output)
         self.control_panel.clear_files_btn.Bind(wx.EVT_BUTTON, self.on_clear_files)
         main_sizer.Add(self.control_panel, 0, wx.ALIGN_CENTER | wx.ALL, 10)
@@ -608,7 +831,6 @@ class BKLoaderApp(wx.Frame):
     
     def on_port_changed(self):
         """串口选择变化"""
-        # 可以在这里添加串口测试代码
         pass
     
     def setup_timer(self):
@@ -630,14 +852,14 @@ class BKLoaderApp(wx.Frame):
         # 检查进度队列
         while not self.progress_queue.empty():
             try:
-                progress = self.progress_queue.get_nowait()
-                if isinstance(progress, tuple) and len(progress) == 2:
-                    wx.PostEvent(self, ProcessCompletedEvent(
-                        status=progress[0], 
-                        data=progress[1]
-                    ))
-                elif isinstance(progress, int):
-                    wx.PostEvent(self, ProgressUpdateEvent(value=progress))
+                item = self.progress_queue.get_nowait()
+                if isinstance(item, int):
+                    # 进度更新
+                    wx.PostEvent(self, ProgressUpdateEvent(value=item))
+                elif isinstance(item, tuple):
+                    # 状态更新
+                    status, data = item
+                    wx.PostEvent(self, ProcessCompletedEvent(status=status, data=data))
             except queue.Empty:
                 break
     
@@ -646,47 +868,72 @@ class BKLoaderApp(wx.Frame):
         text = event.text
         
         # 根据内容着色
-        if "error" in text.lower() or "fail" in text.lower():
+        text_lower = text.lower()
+        if "error" in text_lower or "fail" in text_lower or "failed" in text_lower:
             self.output_panel.append_text(text, wx.RED)
-        elif "success" in text.lower() or "pass" in text.lower() or "ok" in text.lower():
+        elif "success" in text_lower or "pass" in text_lower or "ok" in text_lower or "finished successfully" in text_lower:
             self.output_panel.append_text(text, wx.Colour(0, 128, 0))  # 绿色
-        elif "warning" in text.lower():
+        elif "warning" in text_lower or "stopped" in text_lower or "停止" in text_lower:
             self.output_panel.append_text(text, wx.Colour(255, 140, 0))  # 橙色
+        elif "正在停止" in text_lower:
+            self.output_panel.append_text(text, wx.Colour(255, 87, 34))  # 深橙色
         else:
             self.output_panel.append_text(text)
     
     def on_progress_update(self, event):
         """更新进度条"""
         progress_texts = {
-            20: "开始擦除Flash...",
-            30: "4K擦除完成",
-            40: "64K擦除完成",
-            50: "Flash擦除完成",
-            60: "开始写入Flash...",
-            70: "正在写入数据...",
+            5: "串口连接成功",
+            10: "开始擦除Flash...",
+            15: "开始4K擦除...",
+            20: "4K擦除完成",
+            25: "开始64K擦除...",
+            30: "64K擦除完成",
+            40: "Flash擦除完成",
+            50: "开始写入Flash...",
+            60: "正在写入数据...",
             90: "Flash写入完成",
+            95: "Flash保护中...",
             100: "烧录完成"
         }
         
         status = progress_texts.get(event.value, None)
-        self.progress_panel.update_progress(event.value, status)
+        if status:
+            self.progress_panel.update_progress(event.value, status)
+        else:
+            self.progress_panel.update_progress(event.value)
     
     def on_process_completed(self, event):
         """进程完成事件"""
-        if event.status == "completed":
-            if event.data == 0:
-                self.progress_panel.update_progress(100, "烧录成功完成!")
-                self.output_panel.append_text("\n✓ 烧录成功完成!\n", wx.Colour(0, 128, 0))
-            else:
-                self.progress_panel.update_progress(0, f"烧录失败，退出码: {event.data}")
-                self.output_panel.append_text(f"\n✗ 烧录失败，退出码: {event.data}\n", wx.RED)
+        if event.status == "completed" and event.data == 0:
+            # 烧录成功完成
+            self.progress_panel.update_progress(100, "烧录成功!")
+            self.output_panel.append_text("\n✓ 烧录成功!\n", wx.Colour(0, 128, 0))
+            
+        elif event.status == "failure":
+            # 检测到失败信息
+            self.progress_panel.update_progress(0, "烧录失败")
+            self.output_panel.append_text(f"\n✗ 烧录失败，请检查设备连接和配置\n", wx.RED)
+            
+        elif event.status == "partial":
+            # 烧录部分完成
+            self.progress_panel.update_progress(0, "烧录未完成")
+            self.output_panel.append_text(f"\n⚠ 烧录未完成，进度: {event.data}\n", wx.Colour(255, 140, 0))
+            
+        elif event.status == "stopped":
+            # 用户主动停止
+            self.progress_panel.update_progress(0, "用户停止烧录")
+            self.output_panel.append_text("\n⚠ 烧录已被用户停止\n", wx.Colour(255, 140, 0))
+            
         elif event.status == "error":
-            self.progress_panel.update_progress(0, f"执行错误: {event.data}")
-            self.output_panel.append_text(f"\n✗ 执行错误: {event.data}\n", wx.RED)
+            # 烧录错误
+            self.progress_panel.update_progress(0, f"烧录错误，返回码: {event.data}")
+            self.output_panel.append_text(f"\n✗ 烧录错误，返回码: {event.data}\n", wx.RED)
         
         # 恢复按钮状态
         self.control_panel.flash_btn.Enable()
         self.control_panel.stop_btn.Disable()
+        self.control_panel.force_stop_btn.Disable()
     
     def build_command(self):
         """构建烧录命令"""
@@ -735,29 +982,78 @@ class BKLoaderApp(wx.Frame):
         self.output_panel.clear()
         
         # 重置进度
-        self.progress_panel.update_progress(0, "准备烧录...")
+        self.progress_panel.reset()
         
         # 更新按钮状态
         self.control_panel.flash_btn.Disable()
         self.control_panel.stop_btn.Enable()
+        self.control_panel.force_stop_btn.Enable()
         
         # 显示执行的命令
         self.output_panel.append_text(f"执行命令: {cmd}\n", wx.Colour(0, 0, 255))
         self.output_panel.append_text("="*80 + "\n")
+        
+        self.start_time = None
         
         # 创建并启动执行线程
         self.executor_thread = CommandExecutor(cmd, self.output_queue, self.progress_queue)
         self.executor_thread.start()
     
     def on_stop(self, event):
-        """停止烧录"""
+        """正常停止烧录"""
         if self.executor_thread and self.executor_thread.is_alive():
-            self.executor_thread.stop()
-            self.output_panel.append_text("\n⚠ 烧录已被用户停止\n", wx.Colour(255, 140, 0))
-            self.progress_panel.update_progress(0, "烧录已停止")
+            # 显示停止信息
+            self.output_panel.append_text("\n正在停止烧录...\n", wx.Colour(255, 140, 0))
+            self.progress_panel.progress_label.SetLabel("正在停止...")
             
-            self.control_panel.flash_btn.Enable()
+            # 调用停止方法
+            self.executor_thread.stop()
+            
+            # 禁用停止按钮，防止重复点击
             self.control_panel.stop_btn.Disable()
+            self.control_panel.force_stop_btn.Disable()
+    
+    def on_force_stop(self, event):
+        """强制停止烧录"""
+        if self.executor_thread and self.executor_thread.is_alive():
+            # 显示强制停止信息
+            self.output_panel.append_text("\n正在强制停止烧录...\n", wx.Colour(255, 87, 34))
+            self.progress_panel.progress_label.SetLabel("强制停止中...")
+            
+            # 先尝试正常停止
+            self.executor_thread.stop()
+            
+            # 额外措施：查找并终止所有相关进程
+            time.sleep(0.5)  # 等待一下
+            
+            # 查找并终止所有bk_loader相关进程
+            try:
+                bk_pids = ProcessManager.find_processes_by_name("bk_loader")
+                for pid in bk_pids:
+                    try:
+                        ProcessManager.kill_process_tree(pid)
+                        self.output_panel.append_text(f"已终止进程 PID: {pid}\n", wx.Colour(255, 87, 34))
+                    except Exception as e:
+                        pass
+            except Exception as e:
+                pass
+            
+            # 禁用停止按钮
+            self.control_panel.stop_btn.Disable()
+            self.control_panel.force_stop_btn.Disable()
+            
+            # 更新进度和状态
+            wx.CallLater(1000, self.on_force_stop_completed)
+    
+    def on_force_stop_completed(self):
+        """强制停止完成"""
+        self.progress_panel.update_progress(0, "已强制停止")
+        self.output_panel.append_text("\n⚠ 已强制停止烧录\n", wx.Colour(255, 87, 34))
+        
+        # 恢复按钮状态
+        self.control_panel.flash_btn.Enable()
+        self.control_panel.stop_btn.Disable()
+        self.control_panel.force_stop_btn.Disable()
     
     def on_clear_output(self, event):
         """清空输出"""
@@ -781,7 +1077,16 @@ class BKLoaderApp(wx.Frame):
                     config = json.load(f)
                 
                 # 应用配置
-                # 这里可以添加配置加载逻辑
+                if 'serial' in config:
+                    serial_config = config['serial']
+                    # 这里可以添加配置加载逻辑
+                
+                if 'files' in config:
+                    self.files_panel.clear_files()
+                    for file_info in config['files']:
+                        self.files_panel.add_file_item()
+                        # 设置文件路径和地址
+                        
                 wx.MessageBox("配置加载成功!", "提示", wx.OK | wx.ICON_INFORMATION)
             except Exception as e:
                 wx.MessageBox(f"加载配置失败: {e}", "错误", wx.OK | wx.ICON_ERROR)
@@ -829,11 +1134,11 @@ class BKLoaderApp(wx.Frame):
     def on_about(self, event):
         """关于对话框"""
         info = wx.adv.AboutDialogInfo()
-        info.SetName("BK7258 SPI Flash烧录工具")
+        info.SetName("BK7236 Flash烧录工具")
         info.SetVersion("1.0.0")
-        info.SetDescription("用于BK7258芯片的Flash烧录工具\n支持多文件烧录和实时进度显示")
-        info.SetCopyright("© 2026")
-        info.AddDeveloper("wangzhenk@fotile.com")
+        info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持多文件烧录和实时进度显示")
+        info.SetCopyright("© 2024")
+        info.AddDeveloper("开发者")
         
         wx.adv.AboutBox(info)
     
@@ -844,16 +1149,44 @@ class BKLoaderApp(wx.Frame):
         
         if self.executor_thread and self.executor_thread.is_alive():
             self.executor_thread.stop()
-            self.executor_thread.join(timeout=1)
+            # 等待线程结束，但设置超时
+            self.executor_thread.join(timeout=2)
+            
+            # 如果线程仍然存活，强制终止相关进程
+            if self.executor_thread.is_alive():
+                # 查找并终止所有bk_loader相关进程
+                try:
+                    bk_pids = ProcessManager.find_processes_by_name("bk_loader")
+                    for pid in bk_pids:
+                        try:
+                            ProcessManager.kill_process_tree(pid)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         
         self.Destroy()
 
 def main():
     """主函数"""
+    # 设置未捕获异常处理器
+    import traceback
+    sys.excepthook = lambda exc_type, exc_value, exc_traceback: (
+        print("Uncaught exception:", exc_type, exc_value),
+        traceback.print_tb(exc_traceback)
+    )
+    
+    # 创建应用程序
     app = wx.App(False)
-    app.SetAppName("BK7258 SPI Flash Tool")
-    BKLoaderApp()
-    app.MainLoop()
+    app.SetAppName("BK7236FlashTool")
+    
+    try:
+        frame = BKLoaderApp()
+        app.MainLoop()
+    except Exception as e:
+        print(f"程序异常: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
