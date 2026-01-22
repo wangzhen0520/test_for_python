@@ -456,10 +456,10 @@ class ProgressPanel(wx.Panel):
         hbox = wx.BoxSizer(wx.HORIZONTAL)
         
         self.progress_label = wx.StaticText(self, label="准备就绪")
-        hbox.Add(self.progress_label, 1, wx.ALIGN_CENTER_VERTICAL)
+        hbox.Add(self.progress_label, 5, wx.ALIGN_CENTER_VERTICAL)
         
         self.time_label = wx.StaticText(self, label="耗时: --")
-        hbox.Add(self.time_label, 2, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
+        hbox.Add(self.time_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
         
         self.status_label = wx.StaticText(self, label="状态: 空闲")
         hbox.Add(self.status_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
@@ -481,7 +481,8 @@ class ProgressPanel(wx.Panel):
                 self.time_label.SetLabel(f"耗时: {elapsed:.3f}s")
             
             if status:
-                self.progress_label.SetLabel(status)
+                # self.progress_label.SetLabel(status)
+                self.progress_label.SetLabel(f"进度: {value}%")
                 self.status_label.SetLabel(f"状态: {status}")
             else:
                 self.progress_label.SetLabel(f"进度: {value}%")
