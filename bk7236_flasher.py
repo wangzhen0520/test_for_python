@@ -24,6 +24,15 @@ from typing import List, Dict, Tuple, Optional
 (FlashFileAddedEvent, EVT_FLASH_FILE_ADDED) = wx.lib.newevent.NewEvent()
 (FlashFileRemovedEvent, EVT_FLASH_FILE_REMOVED) = wx.lib.newevent.NewEvent()
 
+def resource_path(relative_path):
+    """获取资源文件的路径"""
+    if getattr(sys, 'frozen', False): # 是否为打包后的环境
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
 class ProcessManager:
     """进程管理类，用于快速停止进程"""
     @staticmethod
@@ -1390,7 +1399,10 @@ class BKLoaderApp(wx.Frame):
             if not internal_files:
                 return None  # 没有内部文件需要烧录
             
-            cmd_parts = ["bk_loader.exe", "download"]
+            cmd_parts = []
+            cmd = resource_path(os.path.join("res", "bk_loader.exe"))
+            cmd_parts.append(cmd)
+            cmd_parts.append("download")
             
             port_num = serial_config['port'].replace("COM", "")
             cmd_parts.extend(["-p", port_num])
@@ -1434,7 +1446,10 @@ class BKLoaderApp(wx.Frame):
             if not external_files:
                 return None  # 没有外部文件需要烧录
             
-            cmd_parts = ["bk_loader_nor_ver.exe", "download"]
+            cmd_parts = []
+            cmd = resource_path(os.path.join("res", "bk_loader_nor_ver.exe"))
+            cmd_parts.append(cmd)
+            cmd_parts.append("download")
             
             port_num = serial_config['port'].replace("COM", "")
             cmd_parts.extend(["-p", port_num])
