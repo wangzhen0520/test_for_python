@@ -147,26 +147,27 @@ class FlashFileItem(wx.Panel):
         self.file_path = wx.TextCtrl(self, style=wx.TE_READONLY)
         hbox1.Add(self.file_path, 1, wx.EXPAND | wx.RIGHT, 5)
         
-        browse_btn = wx.Button(self, label="浏览")
-        browse_btn.SetMinSize((50, 25))
-        browse_btn.Bind(wx.EVT_BUTTON, self.on_browse_file)
-        hbox1.Add(browse_btn, 0, wx.RIGHT, 2)
+        self.browse_btn = wx.Button(self, label="浏览...")
+        self.browse_btn.SetMinSize((50, 25))
+        self.browse_btn.Bind(wx.EVT_BUTTON, self.on_browse_file)
+        hbox1.Add(self.browse_btn, 0, wx.RIGHT, 2)
         
         hbox1.Add(wx.StaticText(self, label="地址:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
         
         self.address = wx.TextCtrl(self, value="", size=(70, -1))
         hbox1.Add(self.address, 0, wx.RIGHT, 5)
         
+        # 内部Flash复选框
         self.internal_check = wx.CheckBox(self, label="内部")
         self.internal_check.SetValue(True)  # 默认勾选
         hbox1.Add(self.internal_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 0)
         
         # 删除按钮
-        remove_btn = wx.Button(self, label="删除")
-        remove_btn.SetMinSize((50, 25))
-        remove_btn.SetForegroundColour(wx.RED)
-        remove_btn.Bind(wx.EVT_BUTTON, lambda evt: self.on_remove_callback(self.index))
-        hbox1.Add(remove_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
+        self.remove_btn = wx.Button(self, label="删除")
+        self.remove_btn.SetMinSize((50, 25))
+        self.remove_btn.SetForegroundColour(wx.RED)
+        self.remove_btn.Bind(wx.EVT_BUTTON, lambda evt: self.on_remove_callback(self.index))
+        hbox1.Add(self.remove_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
         
         vbox.Add(hbox1, 0, wx.EXPAND | wx.BOTTOM, 5)
         
@@ -212,6 +213,15 @@ class FlashFileItem(wx.Panel):
             self.enable_check.SetValue(file_info['enabled'])
         if 'internal' in file_info:
             self.internal_check.SetValue(file_info['internal'])
+    
+    def set_enabled(self, enabled):
+        """启用或禁用控件"""
+        self.enable_check.Enable(enabled)
+        self.file_path.Enable(enabled)
+        self.browse_btn.Enable(enabled)
+        self.address.Enable(enabled)
+        self.internal_check.Enable(enabled)
+        self.remove_btn.Enable(enabled)
 
 class CommandExecutor(threading.Thread):
     """执行命令的线程类"""
@@ -805,6 +815,15 @@ class SerialPortPanel(wx.Panel):
                     self.port_combo.SetSelection(0)
         except wx.PyDeadObjectError:
             pass
+    
+    def set_enabled(self, enabled):
+        """启用或禁用控件"""
+        self.port_combo.Enable(enabled)
+        self.refresh_btn.Enable(enabled)
+        self.baudrate_combo.Enable(enabled)
+        self.uart_combo.Enable(enabled)
+        self.fast_link_check.Enable(enabled)
+        self.big_endian_check.Enable(enabled)
 
 class FlashFilesPanel(wx.Panel):
     """烧录文件配置面板 - 支持滚动显示"""
@@ -955,6 +974,14 @@ class FlashFilesPanel(wx.Panel):
         self.scrolled_window.SetVirtualSize(self.scrolled_window.GetBestVirtualSize())
         self.scrolled_window.Layout()
         self.update_file_count()
+    
+    def set_enabled(self, enabled):
+        """启用或禁用控件"""
+        self.add_internal_btn.Enable(enabled)
+        self.add_external_btn.Enable(enabled)
+        
+        for item in self.file_items:
+            item.set_enabled(enabled)
 
 class ControlPanel(wx.Panel):
     """控制面板 - 现在放在进度面板下面"""
@@ -1380,6 +1407,19 @@ class BKLoaderApp(wx.Frame):
             self.control_panel.stop_btn.Disable()
             self.current_flash_stage = None
             self.waiting_for_reboot = False
+            
+            # 启用配置区域
+            self.enable_config_areas(True)
+        except wx.PyDeadObjectError:
+            pass
+    
+    def enable_config_areas(self, enabled):
+        """启用或禁用配置区域"""
+        try:
+            self.serial_panel.set_enabled(enabled)
+            self.files_panel.set_enabled(enabled)
+            self.control_panel.clear_btn.Enable(enabled)
+            self.control_panel.clear_files_btn.Enable(enabled)
         except wx.PyDeadObjectError:
             pass
     
@@ -1489,6 +1529,9 @@ class BKLoaderApp(wx.Frame):
             
             self.control_panel.flash_btn.Disable()
             self.control_panel.stop_btn.Enable()
+            
+            # 禁用配置区域
+            self.enable_config_areas(False)
             
             self.output_panel.append_text("="*80 + "\n")
             self.output_panel.append_text("开始烧录流程...\n", wx.Colour(0, 0, 255))
@@ -1713,10 +1756,10 @@ class BKLoaderApp(wx.Frame):
     def on_about(self, event):
         info = wx.adv.AboutDialogInfo()
         info.SetName("BK7236 Flash烧录工具")
-        info.SetVersion("1.2.0")
+        info.SetVersion("1.3.0")
         info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持内部Flash和外部SPI Flash烧录\n支持多文件烧录和实时进度显示")
-        info.SetCopyright("© 2024")
-        info.AddDeveloper("开发者")
+        info.SetCopyright("© 2026")
+        info.AddDeveloper("wz")
         
         wx.adv.AboutBox(info)
 
