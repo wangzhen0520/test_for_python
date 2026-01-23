@@ -125,41 +125,31 @@ class FlashFileItem(wx.Panel):
         self.enable_check.Bind(wx.EVT_CHECKBOX, self.on_enable_changed)
         hbox1.Add(self.enable_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
-        hbox1.Add(wx.StaticText(self, label=f"文件{self.index+1}:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        
         self.file_path = wx.TextCtrl(self, style=wx.TE_READONLY)
         hbox1.Add(self.file_path, 1, wx.EXPAND | wx.RIGHT, 5)
         
-        browse_btn = wx.Button(self, label="选择文件")
+        browse_btn = wx.Button(self, label="浏览")
+        browse_btn.SetMinSize((50, 25))
         browse_btn.Bind(wx.EVT_BUTTON, self.on_browse_file)
-        hbox1.Add(browse_btn, 0, wx.RIGHT, 5)
+        hbox1.Add(browse_btn, 0, wx.RIGHT, 2)
         
-        hbox1.Add(wx.StaticText(self, label="地址:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        hbox1.Add(wx.StaticText(self, label="地址:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
         
-        self.address = wx.TextCtrl(self, value="", size=(100, -1))
+        self.address = wx.TextCtrl(self, value="", size=(70, -1))
         hbox1.Add(self.address, 0, wx.RIGHT, 5)
         
-        vbox.Add(hbox1, 0, wx.EXPAND | wx.BOTTOM, 5)
-        
-        # 第二行：选项和删除按钮
-        hbox2 = wx.BoxSizer(wx.HORIZONTAL)
-        
-        # 内部Flash复选框
-        self.internal_check = wx.CheckBox(self, label="内部bin文件")
+        self.internal_check = wx.CheckBox(self, label="内部")
         self.internal_check.SetValue(True)  # 默认勾选
-        hbox2.Add(self.internal_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
-        
-        # 添加一个弹性空间，让删除按钮靠右
-        hbox2.AddStretchSpacer(1)
+        hbox1.Add(self.internal_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 0)
         
         # 删除按钮
         remove_btn = wx.Button(self, label="删除")
-        remove_btn.SetMinSize((60, 25))
+        remove_btn.SetMinSize((50, 25))
         remove_btn.SetForegroundColour(wx.RED)
         remove_btn.Bind(wx.EVT_BUTTON, lambda evt: self.on_remove_callback(self.index))
-        hbox2.Add(remove_btn, 0)
+        hbox1.Add(remove_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
         
-        vbox.Add(hbox2, 0, wx.EXPAND)
+        vbox.Add(hbox1, 0, wx.EXPAND | wx.BOTTOM, 5)
         
         self.SetSizer(vbox)
     
@@ -649,7 +639,7 @@ class SerialPortPanel(wx.Panel):
         vbox.Add(self.fast_link_check, 0, wx.ALL, 5)
         
         # 大端模式选项（仅内部Flash使用）
-        self.big_endian_check = wx.CheckBox(self, label="大端模式 (--big-endian)")
+        self.big_endian_check = wx.CheckBox(self, label="大端模式 (--big-endian) [仅内部Flash]")
         self.big_endian_check.SetValue(True)
         vbox.Add(self.big_endian_check, 0, wx.ALL, 5)
         
@@ -667,7 +657,6 @@ class SerialPortPanel(wx.Panel):
             try:
                 ports = serial.tools.list_ports.comports()
                 port_names = sorted([port.device for port in ports])
-                
                 for port in port_names:
                     self.port_combo.Append(port)
                 
