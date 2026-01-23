@@ -18,6 +18,6 @@ pyinstaller -F cat1_iqc_detect.py --noconsole --hidden-import serial --hidden-im
 
 bk7236_flasher.py
 # 需要本地和虚拟环境都要安装pyserial才能打包成功
-pyinstaller -F bk7236_flasher.py --noconsole --hidden-import serial --hidden-import wx -p E:\\share\\code\\python_work\\test_for_python\\.venv\\Lib\\site-packages
+pyinstaller -F bk7236_flasher.py --noconsole --hidden-import serial --hidden-import wx -p E:\\share\\code\\python_work\\test_for_python\\.venv\\Lib\\site-packages -i res\\bk7236_flasher.ico
 # 手动修改spec文件 将datas=[], 修改为 datas=[('res', 'res')]
 pyinstaller bk7236_flasher.spec

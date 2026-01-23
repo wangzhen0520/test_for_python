@@ -1061,6 +1061,11 @@ class BKLoaderApp(wx.Frame):
     """BK7236烧录工具主窗口"""
     def __init__(self):
         super().__init__(None, title="BK7236 Flash烧录工具", size=(1000, 700))
+
+        icon = wx.Icon()
+        icon_path = resource_path(os.path.join("res", "bk7236_flasher.ico"))
+        icon.CopyFromBitmap(wx.Bitmap(icon_path, wx.BITMAP_TYPE_ANY))
+        self.SetIcon(icon)
         
         self.internal_executor = None
         self.external_executor = None
@@ -1071,8 +1076,8 @@ class BKLoaderApp(wx.Frame):
         self.current_flash_stage = None  # 当前烧录阶段: None, "internal", "external"
         self.waiting_for_reboot = False  # 是否正在等待重启
         
-        # 配置文件路径
-        self.config_file = os.path.join(os.path.expanduser("./"), ".bk7236_flasher_config.json")
+        # 配置文件路径, 当前用户目录下
+        self.config_file = os.path.join(os.path.expanduser("~"), ".bk7236_flasher_config.json")
         
         self.init_ui()
         self.setup_timer()
@@ -1091,7 +1096,7 @@ class BKLoaderApp(wx.Frame):
         # 加载上次的配置
         wx.CallLater(500, self.load_last_config)
     
-    def init_ui(self):
+    def init_ui(self):        
         main_panel = wx.Panel(self)
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         
