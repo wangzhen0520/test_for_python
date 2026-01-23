@@ -78,7 +78,7 @@ class SerialPortMonitor(threading.Thread):
         self.update_callback = update_callback
         self.interval = interval
         self._stop_event = threading.Event()
-        self.last_ports = set()
+        self.last_ports = []
         self.daemon = True
     
     def stop(self):
@@ -87,14 +87,24 @@ class SerialPortMonitor(threading.Thread):
     def run(self):
         while not self._stop_event.is_set():
             try:
-                current_ports = set([p.device for p in serial.tools.list_ports.comports()])
+                ports = []
+                for port in serial.tools.list_ports.comports():
+                    port_info = {
+                        'device': port.device,
+                        'description': port.description if port.description else '未知设备',
+                        'hwid': port.hwid if port.hwid else '未知ID',
+                        'manufacturer': port.manufacturer if port.manufacturer else '未知厂商',
+                        'product': port.product if port.product else '未知产品'
+                    }
+                    ports.append(port_info)
                 
-                if current_ports != self.last_ports:
-                    self.last_ports = current_ports
-                    port_list = list(current_ports)
-                    port_list.sort()
+                # 按设备名排序
+                ports.sort(key=lambda x: x['device'])
+                
+                if ports != self.last_ports:
+                    self.last_ports = ports
                     try:
-                        wx.CallAfter(self.update_callback, port_list)
+                        wx.CallAfter(self.update_callback, ports)
                     except wx.PyDeadObjectError:
                         break
                 
@@ -590,6 +600,7 @@ class SerialPortPanel(wx.Panel):
     """串口配置面板"""
     def __init__(self, parent):
         super().__init__(parent)
+        self.port_info_dict = {}  # 存储端口设备名到详细信息的映射
         self.init_ui()
         
     def init_ui(self):
@@ -605,6 +616,7 @@ class SerialPortPanel(wx.Panel):
         hbox1.Add(wx.StaticText(self, label="串   口:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         self.port_combo = wx.ComboBox(self, style=wx.CB_READONLY)
+        self.port_combo.SetToolTip("显示格式: 串口号 - 描述信息")
         hbox1.Add(self.port_combo, 1, wx.EXPAND | wx.RIGHT, 5)
         
         self.refresh_btn = wx.Button(self, label="刷新")
@@ -618,7 +630,7 @@ class SerialPortPanel(wx.Panel):
         hbox2.Add(wx.StaticText(self, label="波特率:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         self.baudrate_combo = wx.ComboBox(self, value="2000000", 
-                                         choices=["115200", "230400", "460800", "921600", "2000000"])
+                                         choices=["115200", "512000", "921600", "1000000", "1500000", "2000000", "3000000", "4000000", "5000000", "6000000"])
         hbox2.Add(self.baudrate_combo, 0, wx.RIGHT, 5)
         
         vbox.Add(hbox2, 0, wx.EXPAND | wx.ALL, 5)
@@ -628,7 +640,7 @@ class SerialPortPanel(wx.Panel):
         hbox3.Add(wx.StaticText(self, label="UART类型:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         self.uart_combo = wx.ComboBox(self, value="CH340", 
-                                     choices=["CH340", "CP2102", "FT232", "PL2303", "其他"])
+                                     choices=["CH340"])
         hbox3.Add(self.uart_combo, 0, wx.RIGHT, 5)
         
         vbox.Add(hbox3, 0, wx.EXPAND | wx.ALL, 5)
@@ -653,17 +665,38 @@ class SerialPortPanel(wx.Panel):
         try:
             current_selection = self.port_combo.GetValue()
             self.port_combo.Clear()
+            self.port_info_dict.clear()
             
             try:
                 ports = serial.tools.list_ports.comports()
-                port_names = sorted([port.device for port in ports])
-                for port in port_names:
-                    self.port_combo.Append(port)
+                port_info_list = []
+                
+                for port in ports:
+                    # 构建显示文本
+                    description = port.description if port.description else "未知设备"
+                    display_text = f"{port.device} - {description}"
+                    
+                    # 存储端口信息
+                    self.port_info_dict[display_text] = {
+                        'device': port.device,
+                        'description': port.description if port.description else '未知设备',
+                        'hwid': port.hwid if port.hwid else '未知ID',
+                        'manufacturer': port.manufacturer if port.manufacturer else '未知厂商',
+                        'product': port.product if port.product else '未知产品'
+                    }
+                    
+                    port_info_list.append(display_text)
+                
+                # 按设备名排序
+                port_info_list.sort()
+                
+                for display_text in port_info_list:
+                    self.port_combo.Append(display_text)
                 
                 # 尝试恢复之前的选择
-                if current_selection in port_names:
+                if current_selection in port_info_list:
                     self.port_combo.SetValue(current_selection)
-                elif port_names:
+                elif port_info_list:
                     self.port_combo.SetSelection(0)
             except Exception as e:
                 print(f"获取串口列表失败: {e}")
@@ -672,8 +705,21 @@ class SerialPortPanel(wx.Panel):
     
     def get_config(self):
         try:
+            selected_text = self.port_combo.GetValue()
+            port_device = ""
+            
+            if selected_text and selected_text in self.port_info_dict:
+                port_device = self.port_info_dict[selected_text]['device']
+            elif selected_text:
+                # 如果没有在字典中找到，尝试解析设备名
+                # 格式: COMx - 描述信息
+                if " - " in selected_text:
+                    port_device = selected_text.split(" - ")[0]
+                else:
+                    port_device = selected_text
+            
             return {
-                'port': self.port_combo.GetValue(),
+                'port': port_device,
                 'baudrate': self.baudrate_combo.GetValue(),
                 'uart_type': self.uart_combo.GetValue(),
                 'fast_link': self.fast_link_check.GetValue(),
@@ -686,7 +732,20 @@ class SerialPortPanel(wx.Panel):
         """设置串口配置"""
         try:
             if 'port' in config:
-                self.port_combo.SetValue(config['port'])
+                port_device = config['port']
+                # 查找对应的显示文本
+                display_text = None
+                for text, info in self.port_info_dict.items():
+                    if info['device'] == port_device:
+                        display_text = text
+                        break
+                
+                if display_text:
+                    self.port_combo.SetValue(display_text)
+                else:
+                    # 如果找不到，尝试直接设置
+                    self.port_combo.SetValue(port_device)
+            
             if 'baudrate' in config:
                 self.baudrate_combo.SetValue(config['baudrate'])
             if 'uart_type' in config:
@@ -698,18 +757,43 @@ class SerialPortPanel(wx.Panel):
         except wx.PyDeadObjectError:
             pass
     
-    def set_port_list(self, port_list):
+    def set_port_list(self, port_info_list):
+        """设置串口列表（用于串口监控更新）"""
         try:
             current_selection = self.port_combo.GetValue()
             self.port_combo.Clear()
+            self.port_info_dict.clear()
             
-            for port in port_list:
-                self.port_combo.Append(port)
+            # 构建显示文本列表
+            display_texts = []
+            for port_info in port_info_list:
+                device = port_info['device']
+                description = port_info['description']
+                display_text = f"{device} - {description}"
+                
+                self.port_info_dict[display_text] = port_info
+                display_texts.append(display_text)
             
-            if current_selection in port_list:
+            # 排序
+            display_texts.sort()
+            
+            for display_text in display_texts:
+                self.port_combo.Append(display_text)
+            
+            # 尝试恢复之前的选择
+            if current_selection in display_texts:
                 self.port_combo.SetValue(current_selection)
-            elif port_list:
-                self.port_combo.SetSelection(0)
+            elif display_texts:
+                # 如果没有找到完全匹配的，尝试部分匹配
+                found = False
+                for display_text in display_texts:
+                    if current_selection and current_selection.split(" - ")[0] in display_text:
+                        self.port_combo.SetValue(display_text)
+                        found = True
+                        break
+                
+                if not found:
+                    self.port_combo.SetSelection(0)
         except wx.PyDeadObjectError:
             pass
 
@@ -1162,10 +1246,10 @@ class BKLoaderApp(wx.Frame):
         self.serial_monitor = SerialPortMonitor(self.on_serial_ports_changed)
         self.serial_monitor.start()
     
-    def on_serial_ports_changed(self, port_list):
+    def on_serial_ports_changed(self, port_info_list):
         if not self._closing:
             try:
-                wx.PostEvent(self, SerialPortsUpdateEvent(ports=port_list))
+                wx.PostEvent(self, SerialPortsUpdateEvent(ports=port_info_list))
             except wx.PyDeadObjectError:
                 pass
     
@@ -1471,12 +1555,11 @@ class BKLoaderApp(wx.Frame):
                 self.output_queue, 
                 self.progress_queue,
                 tool_type="external",
-                progress_offset=0,  # 外部烧录从50%开始
+                progress_offset=0,
                 callback=self.on_external_completed  # 设置回调函数
             )
             self.external_executor.start()
         else:
-            print("外部烧录命令构建失败")
             self.on_external_completed(False, False)
     
     def on_external_completed(self, success=True, user_stopped=False):
