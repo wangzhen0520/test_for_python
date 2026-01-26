@@ -12,6 +12,28 @@ import datetime
 from threading import Thread
 import wx.lib.newevent
 import wx.grid
+import logging
+from logging.handlers import RotatingFileHandler
+
+# 创建logger对象
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # log等级总开关
+
+# log输出格式
+formatter = logging.Formatter("%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s")
+
+# 控制台handler
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
+# 文件handler
+# file_handler = 
+file_handler = RotatingFileHandler("logs\\logging.log", maxBytes=10 * 1024, backupCount=2, encoding='utf-8')
+file_handler.setFormatter(formatter)
+
+# 添加到logger
+logger.addHandler(stream_handler)
+logger.addHandler(file_handler)
 
 # 自定义事件，用于线程与主线程通信
 TtsProgressEvent, EVT_TTS_PROGRESS = wx.lib.newevent.NewEvent()
@@ -64,9 +86,9 @@ class TTSWorker(Thread):
                     if not filename or filename.strip() == '':
                         # 取前30个字符作为文件名，移除非法字符
                         safe_text = ''.join(c for c in text_content if c.isalnum() or c in (' ', '-', '_'))[:30]
-                        filename = f"{safe_text.strip()}.mp3"
-                    elif not filename.endswith('.mp3'):
-                        filename = f"{filename}.mp3"
+                        filename = f"{safe_text.strip()}.{self.params['audio_format']}"
+                    elif not filename.endswith(f".{self.params['audio_format']}"):
+                        filename = f"{filename}.{self.params['audio_format']}"
                     
                     wx.PostEvent(self.parent, TtsProgressEvent(
                         current=processed,
@@ -147,15 +169,15 @@ class TTSWorker(Thread):
             "request": {
                 "requestId": nonce,
                 "audio": {
-                    "audioType": "mp3",
-                    "sampleRate": 16000
+                    "audioType": self.params.get('audio_format', 'mp3'),
+                    "sampleRate": int(self.params.get('sample_rate', 16000)),
                 },
                 "tts": {
                     "text": text,
                     "textType": "text",
                     "voiceId": voice_id,
-                    "speed": self.params.get('speed', '1.0'),
-                    "volume": self.params.get('volume', 100)
+                    "speed": float(self.params.get('speed', '1.0')),
+                    "volume": int(self.params.get('volume', 100))
                 }
             }
         }
@@ -164,6 +186,7 @@ class TTSWorker(Thread):
         
         payload_body = str.encode(json.dumps(body))
         
+        logger.info("tts request: %s %s", url, body)
         try:
             response = requests.post(url, data=payload_body, headers={'Content-Type': 'application/json'}, timeout=30)
             
@@ -213,9 +236,7 @@ class TextGrid(wx.grid.Grid):
         
         # 设置默认值提示
         self.SetCellValue(0, 0, "欢迎使用语音助手")
-        self.SetCellValue(0, 1, "欢迎语.mp3")
-        self.SetCellValue(1, 0, "操作已完成")
-        self.SetCellValue(1, 1, "完成提示.mp3")
+        self.SetCellValue(0, 1, "欢迎语")
         
         # 设置字体
         font = wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, False)
@@ -244,7 +265,7 @@ class ConfigDialog(wx.Dialog):
     """API配置对话框"""
     def __init__(self, parent):
         wx.Dialog.__init__(self, parent, id=wx.ID_ANY, title="API配置", 
-                          pos=wx.DefaultPosition, size=wx.Size(500, 300))
+                          pos=wx.DefaultPosition, size=wx.Size(500, 310))
         
         self.parent = parent
         self.init_ui()
@@ -272,7 +293,7 @@ class ConfigDialog(wx.Dialog):
         
         # Product Secret
         grid_sizer.Add(wx.StaticText(self, wx.ID_ANY, "Product Secret:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        self.product_secret = wx.TextCtrl(self, wx.ID_ANY, wx.EmptyString, wx.DefaultPosition, wx.DefaultSize, wx.TE_PASSWORD)
+        self.product_secret = wx.TextCtrl(self, wx.ID_ANY, wx.EmptyString, wx.DefaultPosition, wx.DefaultSize, 0)
         grid_sizer.Add(self.product_secret, 0, wx.EXPAND | wx.ALL, 5)
         
         # Device Name
@@ -317,7 +338,7 @@ class SynthesisParamDialog(wx.Dialog):
     """合成参数对话框"""
     def __init__(self, parent):
         wx.Dialog.__init__(self, parent, id=wx.ID_ANY, title="合成参数配置", 
-                          pos=wx.DefaultPosition, size=wx.Size(400, 300))
+                          pos=wx.DefaultPosition, size=wx.Size(400, 340))
         
         self.parent = parent
         self.init_ui()
@@ -345,13 +366,13 @@ class SynthesisParamDialog(wx.Dialog):
         
         # 采样率
         grid_sizer.Add(wx.StaticText(self, wx.ID_ANY, "采样率:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        self.sample_rate = wx.ComboBox(self, wx.ID_ANY, "16000", choices=["8000", "16000", "24000", "32000", "44100", "48000"], 
+        self.sample_rate = wx.ComboBox(self, wx.ID_ANY, "16000", choices=["8000", "11025", "16000", "22050", "24000", "32000", "44100", "48000"], 
                                       style=wx.CB_READONLY, size=(100, -1))
         grid_sizer.Add(self.sample_rate, 0, wx.ALL, 5)
         
         # 音频格式
         grid_sizer.Add(wx.StaticText(self, wx.ID_ANY, "音频格式:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
-        self.audio_format = wx.ComboBox(self, wx.ID_ANY, "mp3", choices=["mp3", "wav", "pcm"], 
+        self.audio_format = wx.ComboBox(self, wx.ID_ANY, "mp3", choices=["mp3", "wav", "pcm", "wav.alaw", "opus"], 
                                        style=wx.CB_READONLY, size=(100, -1))
         grid_sizer.Add(self.audio_format, 0, wx.ALL, 5)
         
@@ -498,13 +519,13 @@ class TTSFrame(wx.Frame):
         
         # 音色列表
         self.voice_list = [
-            ("gdfanfp", "国语-女声-芳平"),
-            ("gqlanfp", "国语-男声-芳平"),
-            ("gdfanf_natong", "国语-女声-娜彤"),
-            ("xbekef", "粤语-男声"),
-            ("jlshimp", "津鲁声-男声"),
-            ("xijunma", "西骏马-男声"),
-            ("xmguof", "小芒果-女声")
+            ("gdfanfp", "精品客服女声芳芳(gdfanfp)"),
+            ("gqlanfp", "精品温柔女声小兰(gqlanfp)"),
+            ("gdfanf_natong", "精品男童方方(gdfanf_natong)"),
+            ("xbekef", "精品女童贝壳(xbekef)"),
+            ("jlshimp", "精品男声季老师(jlshimp)"),
+            ("xijunma", "精品男声小军(xijunma)"),
+            ("xmguof", "精品甜美女声婷婷(xmguof)")
         ]
         
         # 操作按钮
@@ -612,6 +633,8 @@ class TTSFrame(wx.Frame):
         
         # 操作按钮
         self.btn_start = wx.Button(panel, wx.ID_ANY, "开始转换", wx.DefaultPosition, wx.DefaultSize, 0)
+        self.btn_start.SetBackgroundColour(wx.Colour(76, 175, 80))
+        self.btn_start.SetForegroundColour(wx.WHITE)
         self.btn_stop = wx.Button(panel, wx.ID_ANY, "停止", wx.DefaultPosition, wx.DefaultSize, 0)
         self.btn_stop.Disable()
         
@@ -665,9 +688,9 @@ class TTSFrame(wx.Frame):
         # 合成参数控件（隐藏，仅用于存储值）
         self.speed = wx.TextCtrl(self, wx.ID_ANY, "1.0", style=wx.TE_READONLY)
         self.volume = wx.TextCtrl(self, wx.ID_ANY, "100", style=wx.TE_READONLY)
-        self.sample_rate = wx.ComboBox(self, wx.ID_ANY, "16000", choices=["8000", "16000", "24000", "32000", "44100", "48000"], 
+        self.sample_rate = wx.ComboBox(self, wx.ID_ANY, "16000", choices=["8000", "11025", "16000", "22050", "24000", "32000", "44100", "48000"], 
                                       style=wx.CB_READONLY)
-        self.audio_format = wx.ComboBox(self, wx.ID_ANY, "mp3", choices=["mp3", "wav", "pcm"], style=wx.CB_READONLY)
+        self.audio_format = wx.ComboBox(self, wx.ID_ANY, "mp3", choices=["mp3", "wav", "pcm", "wav.alaw", "opus"], style=wx.CB_READONLY)
         
         # 隐藏这些控件
         self.product_id.Hide()
@@ -971,9 +994,7 @@ class TTSFrame(wx.Frame):
         
         # 设置默认值
         self.text_grid.SetCellValue(0, 0, "欢迎使用语音助手")
-        self.text_grid.SetCellValue(0, 1, "欢迎语.mp3")
-        self.text_grid.SetCellValue(1, 0, "操作已完成")
-        self.text_grid.SetCellValue(1, 1, "完成提示.mp3")
+        self.text_grid.SetCellValue(0, 1, "欢迎语")
         
         # 滚动到第一行
         wx.CallAfter(self.text_grid.GoToCell, 0, 0)
