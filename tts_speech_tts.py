@@ -15,25 +15,45 @@ import wx.grid
 import logging
 from logging.handlers import RotatingFileHandler
 
-# 创建logger对象
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # log等级总开关
 
-# log输出格式
-formatter = logging.Formatter("%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s")
+def setup_logging():
+    """配置根logger"""
+    # 创建日志目录
+    log_dir = 'logs'
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # 根logger配置
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    
+    # 清除现有handler（防止重复）
+    root_logger.handlers.clear()
+    
+    # 文件handler
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, 'tts.log'),
+        maxBytes = 10 * 1024,
+        backupCount = 3,
+        encoding = 'utf-8'
+    )
+    file_handler.setLevel(logging.INFO)
+    
+    # 控制台handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    
+    # 格式
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # 添加handler
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
 
-# 控制台handler
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(formatter)
-
-# 文件handler
-# file_handler = 
-file_handler = RotatingFileHandler("logs\\logging.log", maxBytes=10 * 1024, backupCount=2, encoding='utf-8')
-file_handler.setFormatter(formatter)
-
-# 添加到logger
-logger.addHandler(stream_handler)
-logger.addHandler(file_handler)
 
 # 自定义事件，用于线程与主线程通信
 TtsProgressEvent, EVT_TTS_PROGRESS = wx.lib.newevent.NewEvent()
@@ -52,6 +72,7 @@ class TTSWorker(Thread):
         self.params = params
         self.running = True
         self.create_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.logger = logging.getLogger(__name__)
         
     def run(self):
         try:
@@ -186,7 +207,7 @@ class TTSWorker(Thread):
         
         payload_body = str.encode(json.dumps(body))
         
-        logger.info("tts request: %s %s", url, body)
+        self.logger.info("tts request: %s %s", url, body)
         try:
             response = requests.post(url, data=payload_body, headers={'Content-Type': 'application/json'}, timeout=30)
             
@@ -423,6 +444,7 @@ class TTSFrame(wx.Frame):
         wx.Frame.__init__(self, parent, id=wx.ID_ANY, title="文字转语音工具", 
                          pos=wx.DefaultPosition, size=wx.Size(1000, 800),
                          style=wx.DEFAULT_FRAME_STYLE | wx.TAB_TRAVERSAL)
+        self.logger = logging.getLogger(__name__)
         
         self.SetSizeHints(wx.DefaultSize, wx.DefaultSize)
         self.SetBackgroundColour(wx.Colour(255, 255, 255))
@@ -1273,6 +1295,8 @@ class TTSFrame(wx.Frame):
         
         # 滚动到最后
         self.log_text.ShowPosition(self.log_text.GetLastPosition())
+        
+        self.logger.info(message)
 
 class TTSApp(wx.App):
     """应用程序类"""
@@ -1282,5 +1306,8 @@ class TTSApp(wx.App):
         return True
 
 if __name__ == "__main__":
+    # 调用配置函数
+    setup_logging()
+
     app = TTSApp(False)
     app.MainLoop()
