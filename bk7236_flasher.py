@@ -1586,15 +1586,15 @@ class BKLoaderApp(wx.Frame):
         external_files = self.files_panel.get_external_files()
         
         if external_files:
-            # 如果有内部文件和外部文件都需要烧录，等待5秒让设备重启
+            # 如果有内部文件和外部文件都需要烧录，等待1秒让设备重启
             internal_files = self.files_panel.get_internal_files()
             if internal_files and external_files:
                 self.output_panel.append_text("\n" + "="*80 + "\n", wx.Colour(0, 0, 180))
-                self.output_panel.append_text("内部Flash烧录完成，等待5秒设备重启...\n", wx.Colour(0, 0, 180))
+                self.output_panel.append_text("内部Flash烧录完成，等待1秒设备重启...\n", wx.Colour(0, 0, 180))
                 self.output_panel.append_text("="*80 + "\n", wx.Colour(0, 0, 180))
                 
                 self.waiting_for_reboot = True
-                wx.CallLater(5000, self.start_external_flash)
+                wx.CallLater(1000, self.start_external_flash)
             else:
                 # 只有外部文件，直接开始
                 self.start_external_flash()
