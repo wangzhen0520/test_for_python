@@ -1412,6 +1412,7 @@ class BKLoaderApp(wx.Frame):
             self.control_panel.stop_btn.Disable()
             self.current_flash_stage = None
             self.waiting_for_reboot = False
+            self.progress_panel.reset()
             
             # 启用配置区域
             self.enable_config_areas(True)
@@ -1686,6 +1687,7 @@ class BKLoaderApp(wx.Frame):
         try:
             self.progress_panel.update_progress(0, "已停止")
             self.output_panel.append_text("\n⚠ 已停止烧录\n", wx.Colour(255, 87, 34))
+            self.reset_buttons()
         except wx.PyDeadObjectError:
             pass
     
@@ -1761,7 +1763,7 @@ class BKLoaderApp(wx.Frame):
     def on_about(self, event):
         info = wx.adv.AboutDialogInfo()
         info.SetName("BK7236 Flash烧录工具")
-        info.SetVersion("1.3.0")
+        info.SetVersion("1.3.1")
         info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持内部Flash和外部SPI Flash烧录\n支持多文件烧录和实时进度显示")
         info.SetCopyright("© 2026")
         info.AddDeveloper("wz")
