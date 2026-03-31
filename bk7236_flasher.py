@@ -236,7 +236,6 @@ class CommandExecutor(threading.Thread):
         self._stop_event = threading.Event()
         self._user_stopped = False
         self._current_progress = 0
-        self._last_progress_update = 0
         self._has_failure = False
         self._failure_message = ""
         self.process = None
@@ -354,8 +353,6 @@ class CommandExecutor(threading.Thread):
                                 self.progress_queue.put((adjusted_progress, status))
                             except:
                                 pass
-                        
-                        self._last_progress_update = time.time()
                         
             # 等待进程完全结束
             return_code = self.process.wait()
@@ -583,10 +580,6 @@ class ProgressPanel(wx.Panel):
         try:
             self.progress_bar.SetValue(int(value))
             
-            # 启动计时器
-            if self.start_time is None and value > 0:
-                self.start_time = time.time()
-            
             # 更新耗时显示
             if self.start_time:
                 elapsed = time.time() - self.start_time
@@ -611,9 +604,11 @@ class ProgressPanel(wx.Panel):
             self.progress_bar.SetValue(0)
             self.status_label.SetLabel("准备就绪")
             self.time_label.SetLabel("耗时: --")
-            self.start_time = None
         except wx.PyDeadObjectError:
             pass
+        
+    def reset_start_time(self):
+        self.start_time = time.time()
 
 class SerialPortPanel(wx.Panel):
     """串口配置面板"""
@@ -1532,6 +1527,7 @@ class BKLoaderApp(wx.Frame):
         try:
             self.output_panel.clear()
             self.progress_panel.reset()
+            self.progress_panel.reset_start_time()
             
             self.control_panel.flash_btn.Disable()
             self.control_panel.stop_btn.Enable()
@@ -1544,8 +1540,6 @@ class BKLoaderApp(wx.Frame):
             self.output_panel.append_text(f"内部Flash文件数: {len(internal_files)}\n")
             self.output_panel.append_text(f"外部SPI Flash文件数: {len(external_files)}\n")
             self.output_panel.append_text("="*80 + "\n")
-            
-            self.start_time = None
             
             # 先烧录内部Flash
             if internal_files:
@@ -1763,7 +1757,7 @@ class BKLoaderApp(wx.Frame):
     def on_about(self, event):
         info = wx.adv.AboutDialogInfo()
         info.SetName("BK7236 Flash烧录工具")
-        info.SetVersion("1.3.1")
+        info.SetVersion("1.3.2")
         info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持内部Flash和外部SPI Flash烧录\n支持多文件烧录和实时进度显示")
         info.SetCopyright("© 2026")
         info.AddDeveloper("wz")
