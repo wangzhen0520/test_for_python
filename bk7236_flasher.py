@@ -1507,6 +1507,8 @@ class BKLoaderApp(wx.Frame):
             
             if serial_config['fast_link']:
                 cmd_parts.extend(["--fast-link", "1"])
+                
+            cmd_parts.extend(["--update-ver", "1"])
             
             return " ".join(cmd_parts)
         except wx.PyDeadObjectError:
