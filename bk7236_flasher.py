@@ -154,7 +154,7 @@ class FlashFileItem(wx.Panel):
         
         hbox1.Add(wx.StaticText(self, label="地址:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
         
-        self.address = wx.TextCtrl(self, value="", size=(70, -1))
+        self.address = wx.TextCtrl(self, value="0x0", size=(70, -1))
         hbox1.Add(self.address, 0, wx.RIGHT, 5)
         
         # 内部Flash复选框
