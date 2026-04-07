@@ -669,10 +669,11 @@ class SerialPortPanel(wx.Panel):
         # 大端模式选项（仅内部Flash使用）
         self.big_endian_check = wx.CheckBox(self, label="大端模式 (--big-endian) [仅内部Flash]")
         self.big_endian_check.SetValue(True)
-        vbox.Add(self.big_endian_check, 0, wx.ALL, 5)
+        self.big_endian_check.Hide()
+        # vbox.Add(self.big_endian_check, 0, wx.ALL, 5)
         
-        self.update_ver_check = wx.CheckBox(self, label="更新版本 (--update-ver) [仅外部Flash]")
-        self.update_ver_check.SetValue(True)  # 默认勾选
+        self.update_ver_check = wx.CheckBox(self, label="更新版本信息 (--update-ver) [仅外部Flash]")
+        self.update_ver_check.SetValue(False)  # 默认勾选
         vbox.Add(self.update_ver_check, 0, wx.ALL, 5)
         
         self.SetSizer(vbox)
@@ -1771,7 +1772,7 @@ class BKLoaderApp(wx.Frame):
     def on_about(self, event):
         info = wx.adv.AboutDialogInfo()
         info.SetName("BK7236 Flash烧录工具")
-        info.SetVersion("1.3.3")
+        info.SetVersion("1.3.4")
         info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持内部Flash和外部SPI Flash烧录\n支持多文件烧录和实时进度显示")
         info.SetCopyright("© 2026")
         info.AddDeveloper("wz")
