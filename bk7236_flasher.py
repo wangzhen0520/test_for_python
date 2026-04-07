@@ -650,24 +650,30 @@ class SerialPortPanel(wx.Panel):
         vbox.Add(hbox2, 0, wx.EXPAND | wx.ALL, 5)
         
         # UART类型
-        hbox3 = wx.BoxSizer(wx.HORIZONTAL)
-        hbox3.Add(wx.StaticText(self, label="UART类型:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        # hbox3 = wx.BoxSizer(wx.HORIZONTAL)
+        # hbox3.Add(wx.StaticText(self, label="UART类型:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         self.uart_combo = wx.ComboBox(self, value="CH340", 
                                      choices=["CH340"])
-        hbox3.Add(self.uart_combo, 0, wx.RIGHT, 5)
+        self.uart_combo.Hide()
+        # hbox3.Add(self.uart_combo, 0, wx.RIGHT, 5)
         
-        vbox.Add(hbox3, 0, wx.EXPAND | wx.ALL, 5)
+        # vbox.Add(hbox3, 0, wx.EXPAND | wx.ALL, 5)
         
         # 快速连接选项
         self.fast_link_check = wx.CheckBox(self, label="快速连接 (--fast-link)")
         self.fast_link_check.SetValue(True)
-        vbox.Add(self.fast_link_check, 0, wx.ALL, 5)
+        self.fast_link_check.Hide()
+        # vbox.Add(self.fast_link_check, 0, wx.ALL, 5)
         
         # 大端模式选项（仅内部Flash使用）
         self.big_endian_check = wx.CheckBox(self, label="大端模式 (--big-endian) [仅内部Flash]")
         self.big_endian_check.SetValue(True)
         vbox.Add(self.big_endian_check, 0, wx.ALL, 5)
+        
+        self.update_ver_check = wx.CheckBox(self, label="更新版本 (--update-ver) [仅外部Flash]")
+        self.update_ver_check.SetValue(True)  # 默认勾选
+        vbox.Add(self.update_ver_check, 0, wx.ALL, 5)
         
         self.SetSizer(vbox)
         self.refresh_ports()
@@ -737,7 +743,8 @@ class SerialPortPanel(wx.Panel):
                 'baudrate': self.baudrate_combo.GetValue(),
                 'uart_type': self.uart_combo.GetValue(),
                 'fast_link': self.fast_link_check.GetValue(),
-                'big_endian': self.big_endian_check.GetValue()
+                'big_endian': self.big_endian_check.GetValue(),
+                'update_ver': self.update_ver_check.GetValue()
             }
         except wx.PyDeadObjectError:
             return {}
@@ -768,6 +775,8 @@ class SerialPortPanel(wx.Panel):
                 self.fast_link_check.SetValue(config['fast_link'])
             if 'big_endian' in config:
                 self.big_endian_check.SetValue(config['big_endian'])
+            if 'update_ver' in config:
+                self.update_ver_check.SetValue(config['update_ver'])
         except wx.PyDeadObjectError:
             pass
     
@@ -815,10 +824,12 @@ class SerialPortPanel(wx.Panel):
         """启用或禁用控件"""
         self.port_combo.Enable(enabled)
         self.refresh_btn.Enable(enabled)
+        # 隐藏控件可以不调用 Enable，或者也调用以保持一致性
         self.baudrate_combo.Enable(enabled)
         self.uart_combo.Enable(enabled)
         self.fast_link_check.Enable(enabled)
         self.big_endian_check.Enable(enabled)
+        self.update_ver_check.Enable(enabled)
 
 class FlashFilesPanel(wx.Panel):
     """烧录文件配置面板 - 支持滚动显示"""
@@ -1508,7 +1519,8 @@ class BKLoaderApp(wx.Frame):
             if serial_config['fast_link']:
                 cmd_parts.extend(["--fast-link", "1"])
                 
-            cmd_parts.extend(["--update-ver", "1"])
+            if serial_config.get('update_ver', False):
+                cmd_parts.extend(["--update-ver", "1"])
             
             return " ".join(cmd_parts)
         except wx.PyDeadObjectError:
@@ -1759,7 +1771,7 @@ class BKLoaderApp(wx.Frame):
     def on_about(self, event):
         info = wx.adv.AboutDialogInfo()
         info.SetName("BK7236 Flash烧录工具")
-        info.SetVersion("1.3.2")
+        info.SetVersion("1.3.3")
         info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持内部Flash和外部SPI Flash烧录\n支持多文件烧录和实时进度显示")
         info.SetCopyright("© 2026")
         info.AddDeveloper("wz")
