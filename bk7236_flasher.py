@@ -1,6 +1,7 @@
 import wx
 import wx.lib.newevent
 import wx.adv
+import io
 import subprocess
 import threading
 import queue
@@ -15,6 +16,9 @@ import psutil
 import json
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
+from bk7236_flasher_icon import get_icon_bytes
+
+APP_VERSION = "1.3.5"
 
 # 定义自定义事件
 (ProgressUpdateEvent, EVT_PROGRESS_UPDATE) = wx.lib.newevent.NewEvent()
@@ -25,12 +29,16 @@ from typing import List, Dict, Tuple, Optional
 (FlashFileRemovedEvent, EVT_FLASH_FILE_REMOVED) = wx.lib.newevent.NewEvent()
 
 def resource_path(relative_path):
-    """获取资源文件的路径"""
-    if getattr(sys, 'frozen', False): # 是否为打包后的环境
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    """Return a resource path for source runs and PyInstaller bundles."""
+    base_path = Path(__file__).resolve().parent
+    return str(base_path / relative_path)
+
+
+def command_to_text(cmd):
+    """Format a subprocess command for logs."""
+    if isinstance(cmd, (list, tuple)):
+        return subprocess.list2cmdline([str(part) for part in cmd])
+    return str(cmd)
 
 
 class ProcessManager:
@@ -282,7 +290,7 @@ class CommandExecutor(threading.Thread):
                 errors='replace',
                 bufsize=1,
                 universal_newlines=True,
-                shell=True
+                shell=False
             )
             
             self.process_pid = self.process.pid
@@ -291,7 +299,7 @@ class CommandExecutor(threading.Thread):
             try:
                 tool_name = "内部Flash" if self.tool_type == "internal" else "外部SPI Flash"
                 self.progress_queue.put((self.progress_offset, f"准备{tool_name}烧录..."))
-                self.output_queue.put(f"{tool_prefix} 执行命令: {self.cmd}\n")
+                self.output_queue.put(f"{tool_prefix} 执行命令: {command_to_text(self.cmd)}\n")
             except:
                 pass
             
@@ -1070,8 +1078,8 @@ class BKLoaderApp(wx.Frame):
         super().__init__(None, title="BK7236 Flash烧录工具", size=(1000, 700))
 
         icon = wx.Icon()
-        icon_path = resource_path(os.path.join("res", "bk7236_flasher.ico"))
-        icon.CopyFromBitmap(wx.Bitmap(icon_path, wx.BITMAP_TYPE_ANY))
+        icon_image = wx.Image(io.BytesIO(get_icon_bytes()), wx.BITMAP_TYPE_ANY)
+        icon.CopyFromBitmap(wx.Bitmap(icon_image))
         self.SetIcon(icon)
         
         self.internal_executor = None
@@ -1479,7 +1487,7 @@ class BKLoaderApp(wx.Frame):
             if serial_config['fast_link']:
                 cmd_parts.extend(["--fast-link", "1"])
             
-            return " ".join(cmd_parts)
+            return cmd_parts
         except wx.PyDeadObjectError:
             return None
     
@@ -1523,7 +1531,7 @@ class BKLoaderApp(wx.Frame):
             if serial_config.get('update_ver', False):
                 cmd_parts.extend(["--update-ver", "1"])
             
-            return " ".join(cmd_parts)
+            return cmd_parts
         except wx.PyDeadObjectError:
             return None
     
@@ -1772,7 +1780,7 @@ class BKLoaderApp(wx.Frame):
     def on_about(self, event):
         info = wx.adv.AboutDialogInfo()
         info.SetName("BK7236 Flash烧录工具")
-        info.SetVersion("1.3.4")
+        info.SetVersion(APP_VERSION)
         info.SetDescription("用于BK7236芯片的Flash烧录工具\n支持内部Flash和外部SPI Flash烧录\n支持多文件烧录和实时进度显示")
         info.SetCopyright("© 2026")
         info.AddDeveloper("wz")

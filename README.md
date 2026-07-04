@@ -21,11 +21,11 @@ pyinstaller -F cat1_iqc_detect.py --noconsole --hidden-import serial --hidden-im
 
 bk7236_flasher.py
 # 虚拟环境中安装以下库
-pip install psutil
-# 打包exe
-pyinstaller -F bk7236_flasher.py --noconsole --hidden-import serial --hidden-import wx -p E:\\share\\code\\python_work\\test_for_python\\.venv\\Lib\\site-packages -i res\\bk7236_flasher.ico
-# 手动修改spec文件 将datas=[], 修改为 datas=[('res', 'res')]
-pyinstaller bk7236_flasher.spec
+pip install pyserial wxPython psutil pyinstaller
+# 打包 exe（onedir 目录模式，避免 onefile 运行时解压到 TEMP/_MEI...）
+# 图标已内嵌到代码和 spec 中，res 目录只需要保留两个 loader exe
+pyinstaller -y bk7236_flasher.spec
+# 输出目录: dist\bk7236_flasher\bk7236_flasher.exe
 
 test_speech_tts.py
 # 虚拟环境中安装以下库
