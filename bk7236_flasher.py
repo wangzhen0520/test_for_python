@@ -41,6 +41,20 @@ def command_to_text(cmd):
     return str(cmd)
 
 
+def subprocess_startup_options():
+    """Hide console windows created by bundled command-line tools on Windows."""
+    if os.name != "nt":
+        return {}
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
 class ProcessManager:
     """进程管理类，用于快速停止进程"""
     @staticmethod
@@ -290,7 +304,8 @@ class CommandExecutor(threading.Thread):
                 errors='replace',
                 bufsize=1,
                 universal_newlines=True,
-                shell=False
+                shell=False,
+                **subprocess_startup_options()
             )
             
             self.process_pid = self.process.pid
