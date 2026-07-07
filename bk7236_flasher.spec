@@ -25,7 +25,7 @@ a = Analysis(
         (str(SPEC_DIR / 'res' / 'bk_loader.exe'), 'res'),
         (str(SPEC_DIR / 'res' / 'bk_loader_nor_ver.exe'), 'res'),
     ],
-    hiddenimports=['serial', 'wx'],
+    hiddenimports=['serial', 'wx', 'wx.adv', 'wx.lib.newevent', 'psutil'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
