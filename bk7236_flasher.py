@@ -14,11 +14,13 @@ import time
 import signal
 import psutil
 import json
+import ctypes
+from ctypes import wintypes
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from bk7236_flasher_icon import get_icon_bytes
 
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.6"
 
 # 定义自定义事件
 (ProgressUpdateEvent, EVT_PROGRESS_UPDATE) = wx.lib.newevent.NewEvent()
@@ -53,6 +55,64 @@ def subprocess_startup_options():
         "creationflags": subprocess.CREATE_NO_WINDOW,
         "startupinfo": startupinfo,
     }
+
+
+_SERIAL_USAGE_PROBE_LOCK = threading.Lock()
+
+
+def is_serial_port_in_use(port_device):
+    """串行执行占用探测，避免刷新线程之间互相误判。"""
+    with _SERIAL_USAGE_PROBE_LOCK:
+        return _probe_serial_port_in_use(port_device)
+
+
+def _probe_serial_port_in_use(port_device):
+    """检测串口是否无法被独占打开，不修改串口通信参数。"""
+    if not port_device:
+        return False
+
+    if os.name == "nt":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        handle = create_file(
+            f"\\\\.\\{port_device}",
+            0x80000000 | 0x40000000,  # GENERIC_READ | GENERIC_WRITE
+            0,
+            None,
+            3,  # OPEN_EXISTING
+            0x80,  # FILE_ATTRIBUTE_NORMAL
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            return True
+
+        close_handle(handle)
+        return False
+
+    test_port = None
+    try:
+        test_port = serial.Serial(port=port_device, timeout=0)
+        return False
+    except (serial.SerialException, OSError, ValueError):
+        return True
+    finally:
+        if test_port and test_port.is_open:
+            test_port.close()
 
 
 class ProcessManager:
@@ -109,23 +169,52 @@ class SerialPortMonitor(threading.Thread):
         self.update_callback = update_callback
         self.interval = interval
         self._stop_event = threading.Event()
+        self._usage_checks_paused = threading.Event()
+        self._usage_check_lock = threading.Lock()
         self.last_ports = []
         self.daemon = True
     
     def stop(self):
         self._stop_event.set()
+
+    def pause_usage_checks(self):
+        """暂停占用探测，并等待当前探测结束。"""
+        self._usage_checks_paused.set()
+        with self._usage_check_lock:
+            pass
+
+    def resume_usage_checks(self):
+        """恢复占用探测。"""
+        self._usage_checks_paused.clear()
+
+    def get_port_usage(self, port_device, previous_usage=False):
+        if self._usage_checks_paused.is_set():
+            return previous_usage
+
+        with self._usage_check_lock:
+            if self._usage_checks_paused.is_set():
+                return previous_usage
+            return is_serial_port_in_use(port_device)
     
     def run(self):
         while not self._stop_event.is_set():
             try:
                 ports = []
+                previous_usage = {
+                    port_info['device']: port_info.get('used', False)
+                    for port_info in self.last_ports
+                }
                 for port in serial.tools.list_ports.comports():
                     port_info = {
                         'device': port.device,
                         'description': port.description if port.description else '未知设备',
                         'hwid': port.hwid if port.hwid else '未知ID',
                         'manufacturer': port.manufacturer if port.manufacturer else '未知厂商',
-                        'product': port.product if port.product else '未知产品'
+                        'product': port.product if port.product else '未知产品',
+                        'used': self.get_port_usage(
+                            port.device,
+                            previous_usage.get(port.device, False)
+                        )
                     }
                     ports.append(port_info)
                 
@@ -247,17 +336,19 @@ class FlashFileItem(wx.Panel):
 
 class CommandExecutor(threading.Thread):
     """执行命令的线程类"""
-    def __init__(self, cmd, output_queue, progress_queue, tool_type="internal", progress_offset=0, callback=None):
+    def __init__(self, cmd, output_queue, progress_queue, tool_type="internal",
+                 progress_offset=0, progress_span=100, callback=None):
         super().__init__()
         self.cmd = cmd
         self.output_queue = output_queue
         self.progress_queue = progress_queue
         self.tool_type = tool_type  # "internal" 或 "external"
         self.progress_offset = progress_offset  # 进度偏移量，用于多个烧录过程的进度合并
+        self.progress_span = progress_span  # 当前烧录过程占整体进度的比例
         self.callback = callback  # 回调函数
         self._stop_event = threading.Event()
         self._user_stopped = False
-        self._current_progress = 0
+        self._current_progress = 0  # 当前烧录过程的原始进度（0-100）
         self._has_failure = False
         self._failure_message = ""
         self.process = None
@@ -368,10 +459,10 @@ class CommandExecutor(threading.Thread):
                     progress_info = self.parse_progress_and_status(line)
                     if progress_info:
                         progress, status = progress_info
-                        # 调整进度，考虑偏移量
-                        adjusted_progress = self.progress_offset + progress * (100 - self.progress_offset) / 100.0
-                        if adjusted_progress > self._current_progress:
-                            self._current_progress = adjusted_progress
+                        # 将当前任务进度映射到整体进度区间
+                        adjusted_progress = self.progress_offset + progress * self.progress_span / 100.0
+                        if progress > self._current_progress:
+                            self._current_progress = progress
                             try:
                                 self.progress_queue.put((adjusted_progress, status))
                             except:
@@ -394,19 +485,19 @@ class CommandExecutor(threading.Thread):
                 # 调用回调函数，表示烧录失败
                 if self.callback:
                     wx.CallAfter(self.callback, False, False)  # False表示失败，False表示不是用户停止
-            elif self._current_progress >= self.progress_offset + 95:  # 接近完成
+            elif self._current_progress >= 95:  # 当前任务接近完成
                 try:
                     self.output_queue.put(f"{tool_prefix} 烧录成功完成，退出码: {return_code}\n")
-                    self.progress_queue.put((self.progress_offset + 100, f"{tool_name}烧录成功完成!"))
+                    self.progress_queue.put((self.progress_offset + self.progress_span, f"{tool_name}烧录成功完成!"))
                 except:
                     pass
                 # 调用回调函数，表示烧录成功
                 if self.callback:
                     wx.CallAfter(self.callback, True, False)  # True表示成功，False表示不是用户停止
-            elif self._current_progress > self.progress_offset:
+            elif self._current_progress > 0:
                 try:
-                    self.output_queue.put(f"{tool_prefix} 烧录未完成，进度: {int(self._current_progress - self.progress_offset)}%，退出码: {return_code}\n")
-                    self.progress_queue.put((self.progress_offset, f"{tool_name}烧录未完成，进度: {int(self._current_progress - self.progress_offset)}%"))
+                    self.output_queue.put(f"{tool_prefix} 烧录未完成，进度: {int(self._current_progress)}%，退出码: {return_code}\n")
+                    self.progress_queue.put((self.progress_offset, f"{tool_name}烧录未完成，进度: {int(self._current_progress)}%"))
                 except:
                     pass
                 # 调用回调函数，表示烧录部分完成
@@ -653,7 +744,7 @@ class SerialPortPanel(wx.Panel):
         hbox1.Add(wx.StaticText(self, label="串   口:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         
         self.port_combo = wx.ComboBox(self, style=wx.CB_READONLY)
-        self.port_combo.SetToolTip("显示格式: 串口号 - 描述信息")
+        self.port_combo.SetToolTip("显示格式: 串口号 - 描述信息；占用时末尾显示 used")
         hbox1.Add(self.port_combo, 1, wx.EXPAND | wx.RIGHT, 5)
         
         self.refresh_btn = wx.Button(self, label="刷新")
@@ -704,10 +795,34 @@ class SerialPortPanel(wx.Panel):
     
     def on_refresh_ports(self, event):
         self.refresh_ports()
-    
+
+    @staticmethod
+    def make_port_display_text(port_info):
+        display_text = f"{port_info['device']} - {port_info['description']}"
+        if port_info.get('used', False):
+            display_text += " used"
+        return display_text
+
+    def get_selected_port_device(self):
+        selected_text = self.port_combo.GetValue()
+        if selected_text in self.port_info_dict:
+            return self.port_info_dict[selected_text]['device']
+        if selected_text and " - " in selected_text:
+            return selected_text.split(" - ", 1)[0]
+        return selected_text
+
+    def restore_port_selection(self, port_device):
+        if port_device:
+            for display_text, port_info in self.port_info_dict.items():
+                if port_info['device'] == port_device:
+                    self.port_combo.SetValue(display_text)
+                    return
+        if self.port_combo.GetCount():
+            self.port_combo.SetSelection(0)
+
     def refresh_ports(self):
         try:
-            current_selection = self.port_combo.GetValue()
+            current_port_device = self.get_selected_port_device()
             self.port_combo.Clear()
             self.port_info_dict.clear()
             
@@ -716,18 +831,17 @@ class SerialPortPanel(wx.Panel):
                 port_info_list = []
                 
                 for port in ports:
-                    # 构建显示文本
-                    description = port.description if port.description else "未知设备"
-                    display_text = f"{port.device} - {description}"
-                    
                     # 存储端口信息
-                    self.port_info_dict[display_text] = {
+                    port_info = {
                         'device': port.device,
                         'description': port.description if port.description else '未知设备',
                         'hwid': port.hwid if port.hwid else '未知ID',
                         'manufacturer': port.manufacturer if port.manufacturer else '未知厂商',
-                        'product': port.product if port.product else '未知产品'
+                        'product': port.product if port.product else '未知产品',
+                        'used': is_serial_port_in_use(port.device)
                     }
+                    display_text = self.make_port_display_text(port_info)
+                    self.port_info_dict[display_text] = port_info
                     
                     port_info_list.append(display_text)
                 
@@ -737,11 +851,8 @@ class SerialPortPanel(wx.Panel):
                 for display_text in port_info_list:
                     self.port_combo.Append(display_text)
                 
-                # 尝试恢复之前的选择
-                if current_selection in port_info_list:
-                    self.port_combo.SetValue(current_selection)
-                elif port_info_list:
-                    self.port_combo.SetSelection(0)
+                # 根据原始设备名恢复选择，避免 used 状态变化导致跳选
+                self.restore_port_selection(current_port_device)
             except Exception as e:
                 print(f"获取串口列表失败: {e}")
         except wx.PyDeadObjectError:
@@ -807,17 +918,15 @@ class SerialPortPanel(wx.Panel):
     def set_port_list(self, port_info_list):
         """设置串口列表（用于串口监控更新）"""
         try:
-            current_selection = self.port_combo.GetValue()
+            current_port_device = self.get_selected_port_device()
             self.port_combo.Clear()
             self.port_info_dict.clear()
-            
+
             # 构建显示文本列表
             display_texts = []
             for port_info in port_info_list:
-                device = port_info['device']
-                description = port_info['description']
-                display_text = f"{device} - {description}"
-                
+                display_text = self.make_port_display_text(port_info)
+
                 self.port_info_dict[display_text] = port_info
                 display_texts.append(display_text)
             
@@ -827,20 +936,7 @@ class SerialPortPanel(wx.Panel):
             for display_text in display_texts:
                 self.port_combo.Append(display_text)
             
-            # 尝试恢复之前的选择
-            if current_selection in display_texts:
-                self.port_combo.SetValue(current_selection)
-            elif display_texts:
-                # 如果没有找到完全匹配的，尝试部分匹配
-                found = False
-                for display_text in display_texts:
-                    if current_selection and current_selection.split(" - ")[0] in display_text:
-                        self.port_combo.SetValue(display_text)
-                        found = True
-                        break
-                
-                if not found:
-                    self.port_combo.SetSelection(0)
+            self.restore_port_selection(current_port_device)
         except wx.PyDeadObjectError:
             pass
     
@@ -1056,6 +1152,9 @@ class OutputPanel(wx.Panel):
     """输出显示面板"""
     def __init__(self, parent):
         super().__init__(parent)
+        self._progress_line_key = None
+        self._progress_line_start = None
+        self._progress_line_end = None
         self.init_ui()
     
     def init_ui(self):
@@ -1078,14 +1177,55 @@ class OutputPanel(wx.Panel):
         self.SetSizer(vbox)
     
     def append_text(self, text, color=None):
+        self.reset_progress_line()
         if color:
             self.output_text.SetDefaultStyle(wx.TextAttr(color))
         self.output_text.AppendText(text)
         if color:
             self.output_text.SetDefaultStyle(wx.TextAttr(wx.NullColour))
-    
+
+    def append_or_replace_progress(self, text, progress_key, color=None):
+        """同一烧录阶段的百分比日志只保留最新一行。"""
+        text = text.rstrip("\r\n") + "\n"
+        can_replace = (
+            self._progress_line_key == progress_key
+            and self._progress_line_start is not None
+            and self._progress_line_end == self.output_text.GetLastPosition()
+        )
+
+        if can_replace:
+            start = self._progress_line_start
+            self.output_text.Replace(start, self._progress_line_end, text)
+            self._progress_line_end = self.output_text.GetLastPosition()
+            if color:
+                self.output_text.SetStyle(
+                    start,
+                    self._progress_line_end,
+                    wx.TextAttr(color)
+                )
+        else:
+            start = self.output_text.GetLastPosition()
+            if color:
+                self.output_text.SetDefaultStyle(wx.TextAttr(color))
+            self.output_text.AppendText(text)
+            if color:
+                self.output_text.SetDefaultStyle(wx.TextAttr(wx.NullColour))
+            self._progress_line_key = progress_key
+            self._progress_line_start = start
+            self._progress_line_end = self.output_text.GetLastPosition()
+
+        self.output_text.SetInsertionPointEnd()
+        self.output_text.ShowPosition(self.output_text.GetLastPosition())
+
+    def reset_progress_line(self):
+        """结束当前可替换的百分比行。"""
+        self._progress_line_key = None
+        self._progress_line_start = None
+        self._progress_line_end = None
+
     def clear(self):
         self.output_text.Clear()
+        self.reset_progress_line()
 
 class BKLoaderApp(wx.Frame):
     """BK7236烧录工具主窗口"""
@@ -1105,6 +1245,10 @@ class BKLoaderApp(wx.Frame):
         self._closing = False
         self.current_flash_stage = None  # 当前烧录阶段: None, "internal", "external"
         self.waiting_for_reboot = False  # 是否正在等待重启
+        self.reboot_timer = None
+        self.external_flash_files = []
+        self.current_external_index = 0
+        self.flash_has_internal = False
         
         # 配置文件路径, 当前用户目录下
         self.config_file = os.path.join(os.path.expanduser("~"), ".bk7236_flasher_config.json")
@@ -1275,6 +1419,7 @@ class BKLoaderApp(wx.Frame):
         if hasattr(self, 'timer') and self.timer:
             self.timer.Stop()
             self.timer = None
+        self.cancel_reboot_timer()
         
         # 停止串口监控线程
         if self.serial_monitor:
@@ -1316,6 +1461,14 @@ class BKLoaderApp(wx.Frame):
     def start_serial_monitor(self):
         self.serial_monitor = SerialPortMonitor(self.on_serial_ports_changed)
         self.serial_monitor.start()
+
+    def pause_serial_usage_checks(self):
+        if self.serial_monitor:
+            self.serial_monitor.pause_usage_checks()
+
+    def resume_serial_usage_checks(self):
+        if not self._closing and self.serial_monitor:
+            self.serial_monitor.resume_usage_checks()
     
     def on_serial_ports_changed(self, port_info_list):
         if not self._closing:
@@ -1373,7 +1526,31 @@ class BKLoaderApp(wx.Frame):
             
         try:
             text = event.text
-            
+
+            percentage_match = re.search(
+                r'(Erasing Flash|Writing Flash)\s*\.\.\.\s*\d+%',
+                text,
+                re.IGNORECASE
+            )
+            if percentage_match:
+                if "[内部]" in text:
+                    tool_key = "internal"
+                    color = wx.Colour(0, 0, 180)
+                elif "[外部]" in text:
+                    tool_key = "external"
+                    color = wx.Colour(180, 0, 180)
+                else:
+                    tool_key = "unknown"
+                    color = None
+
+                phase_key = percentage_match.group(1).lower()
+                self.output_panel.append_or_replace_progress(
+                    text,
+                    (tool_key, phase_key),
+                    color
+                )
+                return
+
             text_lower = text.lower()
             if "error" in text_lower or "fail" in text_lower or "failed" in text_lower:
                 self.output_panel.append_text(text, wx.RED)
@@ -1438,16 +1615,41 @@ class BKLoaderApp(wx.Frame):
     def reset_buttons(self):
         """重置按钮状态到正常状态"""
         try:
+            self.cancel_reboot_timer()
+            self.resume_serial_usage_checks()
             self.control_panel.flash_btn.Enable()
             self.control_panel.stop_btn.Disable()
             self.current_flash_stage = None
             self.waiting_for_reboot = False
+            self.external_flash_files = []
+            self.current_external_index = 0
+            self.flash_has_internal = False
             self.progress_panel.reset()
             
             # 启用配置区域
             self.enable_config_areas(True)
         except wx.PyDeadObjectError:
             pass
+
+    def cancel_reboot_timer(self):
+        """取消内部/外部分区之间的设备重启等待。"""
+        if self.reboot_timer:
+            try:
+                if self.reboot_timer.IsRunning():
+                    self.reboot_timer.Stop()
+            except (RuntimeError, wx.PyDeadObjectError):
+                pass
+            self.reboot_timer = None
+
+    def schedule_after_reboot(self, callback):
+        """等待设备重启后执行下一烧录步骤。"""
+        self.cancel_reboot_timer()
+        self.waiting_for_reboot = True
+        self.reboot_timer = wx.CallLater(1000, callback)
+
+    def is_serial_port_available(self, serial_config):
+        """检查所选串口是否可被独占打开。"""
+        return not is_serial_port_in_use(serial_config.get('port'))
     
     def enable_config_areas(self, enabled):
         """启用或禁用配置区域"""
@@ -1506,21 +1708,19 @@ class BKLoaderApp(wx.Frame):
         except wx.PyDeadObjectError:
             return None
     
-    def build_external_command(self):
-        """构建外部SPI Flash烧录命令"""
+    def build_external_command(self, file_info):
+        """构建单个外部SPI Flash分区的烧录命令"""
         if self._closing:
             return None
             
         try:
             serial_config = self.serial_panel.get_config()
-            external_files = self.files_panel.get_external_files()
-            
             if not serial_config.get('port'):
                 wx.MessageBox("请选择串口", "错误", wx.OK | wx.ICON_ERROR)
                 return None
-            
-            if not external_files:
-                return None  # 没有外部文件需要烧录
+
+            if not file_info:
+                return None
             
             cmd_parts = []
             cmd = resource_path(os.path.join("res", "bk_loader_nor_ver.exe"))
@@ -1536,9 +1736,7 @@ class BKLoaderApp(wx.Frame):
             
             cmd_parts.append("--mainBin-multi")
             
-            # 构建文件地址列表
-            for file_info in external_files:
-                cmd_parts.append(f"{file_info['path']}@{file_info['address']}")
+            cmd_parts.append(f"{file_info['path']}@{file_info['address']}")
             
             if serial_config['fast_link']:
                 cmd_parts.extend(["--fast-link", "1"])
@@ -1561,8 +1759,27 @@ class BKLoaderApp(wx.Frame):
         if not internal_files and not external_files:
             wx.MessageBox("请至少勾选一个文件进行烧录", "错误", wx.OK | wx.ICON_ERROR)
             return
-        
+
+        serial_config = self.serial_panel.get_config()
+        if not serial_config.get('port'):
+            wx.MessageBox("请选择串口", "错误", wx.OK | wx.ICON_ERROR)
+            return
+
+        self.pause_serial_usage_checks()
+        if not self.is_serial_port_available(serial_config):
+            self.resume_serial_usage_checks()
+            wx.MessageBox(
+                f"串口 {serial_config['port']} 被占用或无法打开，请关闭占用程序后重试",
+                "串口不可用",
+                wx.OK | wx.ICON_WARNING
+            )
+            return
+
         try:
+            self.cancel_reboot_timer()
+            self.external_flash_files = [dict(file_info) for file_info in external_files]
+            self.current_external_index = 0
+            self.flash_has_internal = bool(internal_files)
             self.output_panel.clear()
             self.progress_panel.reset()
             self.progress_panel.reset_start_time()
@@ -1599,7 +1816,7 @@ class BKLoaderApp(wx.Frame):
                 self.on_internal_completed(True, False)  # 没有内部文件，直接开始外部烧录
             
         except wx.PyDeadObjectError:
-            pass
+            self.resume_serial_usage_checks()
     
     def on_internal_completed(self, success=True, user_stopped=False):
         """内部Flash烧录完成回调"""
@@ -1615,19 +1832,15 @@ class BKLoaderApp(wx.Frame):
             self.reset_buttons()
             return
         
-        # 检查是否有外部文件需要烧录
-        external_files = self.files_panel.get_external_files()
-        
-        if external_files:
+        # 使用开始烧录时保存的外部分区快照
+        if self.external_flash_files:
             # 如果有内部文件和外部文件都需要烧录，等待1秒让设备重启
-            internal_files = self.files_panel.get_internal_files()
-            if internal_files and external_files:
+            if self.flash_has_internal:
                 self.output_panel.append_text("\n" + "="*80 + "\n", wx.Colour(0, 0, 180))
                 self.output_panel.append_text("内部Flash烧录完成，等待1秒设备重启...\n", wx.Colour(0, 0, 180))
                 self.output_panel.append_text("="*80 + "\n", wx.Colour(0, 0, 180))
-                
-                self.waiting_for_reboot = True
-                wx.CallLater(1000, self.start_external_flash)
+
+                self.schedule_after_reboot(self.start_external_flash)
             else:
                 # 只有外部文件，直接开始
                 self.start_external_flash()
@@ -1637,21 +1850,40 @@ class BKLoaderApp(wx.Frame):
             self.reset_buttons()
     
     def start_external_flash(self):
-        """开始外部Flash烧录"""
+        """开始当前外部Flash分区烧录"""
+        if self._closing:
+            return
+
+        self.reboot_timer = None
         self.waiting_for_reboot = False
+
+        total = len(self.external_flash_files)
+        if not total or self.current_external_index >= total:
+            self.on_external_completed(False, False)
+            return
+
+        file_info = self.external_flash_files[self.current_external_index]
+        partition_number = self.current_external_index + 1
         self.output_panel.append_text("\n" + "="*80 + "\n", wx.Colour(180, 0, 180))
-        self.output_panel.append_text("开始外部SPI Flash烧录...\n", wx.Colour(180, 0, 180))
+        self.output_panel.append_text(
+            f"开始外部SPI Flash分区 {partition_number}/{total} 烧录...\n",
+            wx.Colour(180, 0, 180)
+        )
+        self.output_panel.append_text(f"文件: {file_info['path']}\n")
+        self.output_panel.append_text(f"地址: {file_info['address']}\n")
         self.output_panel.append_text("="*80 + "\n", wx.Colour(180, 0, 180))
-        
+
         self.current_flash_stage = "external"
-        external_cmd = self.build_external_command()
+        external_cmd = self.build_external_command(file_info)
         if external_cmd:
+            progress_span = 100.0 / total
             self.external_executor = CommandExecutor(
                 external_cmd, 
                 self.output_queue, 
                 self.progress_queue,
                 tool_type="external",
-                progress_offset=0,
+                progress_offset=self.current_external_index * progress_span,
+                progress_span=progress_span,
                 callback=self.on_external_completed  # 设置回调函数
             )
             self.external_executor.start()
@@ -1666,10 +1898,27 @@ class BKLoaderApp(wx.Frame):
             self.reset_buttons()
             return
         
-        if success:
-            self.output_panel.append_text("\n✓ 外部SPI Flash烧录完成!\n", wx.Colour(0, 128, 0))
-        else:
+        if not success:
             self.output_panel.append_text("\n✗ 外部SPI Flash烧录失败\n", wx.RED)
+            self.output_panel.append_text("后续外部分区已取消\n", wx.RED)
+        else:
+            total = len(self.external_flash_files)
+            completed_number = self.current_external_index + 1
+            self.output_panel.append_text(
+                f"\n✓ 外部SPI Flash分区 {completed_number}/{total} 烧录完成!\n",
+                wx.Colour(0, 128, 0)
+            )
+
+            if completed_number < total:
+                self.current_external_index += 1
+                self.output_panel.append_text(
+                    "等待1秒设备重启后烧录下一外部分区...\n",
+                    wx.Colour(180, 0, 180)
+                )
+                self.schedule_after_reboot(self.start_external_flash)
+                return
+
+            self.output_panel.append_text("\n✓ 外部SPI Flash烧录完成!\n", wx.Colour(0, 128, 0))
         
         self.output_panel.append_text("\n" + "="*80 + "\n")
         self.output_panel.append_text("烧录流程结束\n")
@@ -1693,6 +1942,7 @@ class BKLoaderApp(wx.Frame):
             elif self.waiting_for_reboot:
                 # 如果在等待重启阶段，直接停止
                 self.output_panel.append_text("已取消等待重启\n", wx.Colour(255, 87, 34))
+                self.cancel_reboot_timer()
                 self.waiting_for_reboot = False
                 self.reset_buttons()
             
