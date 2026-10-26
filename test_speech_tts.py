@@ -547,7 +547,8 @@ class TTSFrame(wx.Frame):
             ("xbekef", "精品女童贝壳(xbekef)"),
             ("jlshimp", "精品男声季老师(jlshimp)"),
             ("xijunma", "精品男声小军(xijunma)"),
-            ("xmguof", "精品甜美女声婷婷(xmguof)")
+            ("xmguof", "精品甜美女声婷婷(xmguof)"),
+            ("lzliafv5", "臻品可爱男童连连(lzliafv5)")
         ]
         
         # 操作按钮
