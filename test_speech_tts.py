@@ -2,6 +2,7 @@ import wx
 import wx.lib.newevent
 import wx.adv
 import os
+import sys
 import uuid
 import json
 import requests
@@ -58,6 +59,31 @@ def setup_logging():
 # 自定义事件，用于线程与主线程通信
 TtsProgressEvent, EVT_TTS_PROGRESS = wx.lib.newevent.NewEvent()
 TtsCompleteEvent, EVT_TTS_COMPLETE = wx.lib.newevent.NewEvent()
+
+# 内置音色：程序在没有 voices.json 时也可直接使用。
+# 如需新增、改名或停用音色，请在程序目录创建 voices.json，格式见 README.md。
+BUILTIN_VOICES = (
+    ("gdfanfp", "精品客服女声芳芳"),
+    ("gqlanfp", "精品温柔女声小兰"),
+    ("gdfanf_natong", "精品男童方方"),
+    ("xbekef", "精品女童贝壳"),
+    ("jlshimp", "精品男声季老师"),
+    ("xijunma", "精品男声小军"),
+    ("xmguof", "精品甜美女声婷婷"),
+    ("lzliafv5", "臻品可爱男童连连"),
+    ("wqingf_csn", "精品四川话女声文卿"),
+    ("dayaof_csd", "精品山东话女声大瑶"),
+    ("hchunf_ctn", "精品粤语女声何春"),
+    ("yezi1f_csh", "精品上海话女声叶子"),
+)
+
+VOICE_CONFIG_EXAMPLE = """{
+  "voices": [
+    { "id": "new_voice_id", "name": "新增音色名称" },
+    { "id": "xmguof", "name": "修改后的显示名称" },
+    { "id": "yezi1f_csh", "enabled": false }
+  ]
+}"""
 
 def hmac_sha1(key: bytes, message: bytes) -> str:
     """计算 HMAC-SHA1 签名"""
@@ -534,22 +560,101 @@ class TTSFrame(wx.Frame):
         self.SetSizer(main_sizer)
         self.Layout()
     
+    def load_voice_list(self):
+        """加载内置音色，并用程序目录的 voices.json 增量更新。"""
+        if getattr(sys, "frozen", False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+
+        config_path = os.path.join(app_dir, "voices.json")
+        voice_map = {
+            voice_id: {"name": voice_name, "enabled": True}
+            for voice_id, voice_name in BUILTIN_VOICES
+        }
+
+        if not os.path.exists(config_path):
+            self.logger.info("未找到 %s，使用 %d 个内置音色", config_path, len(voice_map))
+            return [
+                (voice_id, f"{voice['name']}({voice_id})")
+                for voice_id, voice in voice_map.items()
+            ]
+
+        try:
+            with open(config_path, "r", encoding="utf-8-sig") as config_file:
+                config = json.load(config_file)
+
+            voices = config.get("voices") if isinstance(config, dict) else config
+            if not isinstance(voices, list):
+                raise ValueError("voices 必须是数组")
+
+            voice_ids = set()
+            for index, voice in enumerate(voices, start=1):
+                if not isinstance(voice, dict):
+                    raise ValueError(f"第 {index} 项必须是对象")
+
+                voice_id = voice.get("id")
+                voice_name = voice.get("name")
+                enabled = voice.get("enabled", True)
+                if not isinstance(voice_id, str) or not voice_id.strip():
+                    raise ValueError(f"第 {index} 项缺少有效的 id")
+                if not isinstance(enabled, bool):
+                    raise ValueError(f"第 {index} 项的 enabled 必须是 true 或 false")
+
+                voice_id = voice_id.strip()
+                if voice_id in voice_ids:
+                    raise ValueError(f"外部配置中的音色 id 重复: {voice_id}")
+                if voice_name is not None:
+                    if not isinstance(voice_name, str) or not voice_name.strip():
+                        raise ValueError(f"第 {index} 项的 name 必须是非空字符串")
+                    voice_name = voice_name.strip()
+                elif voice_id in voice_map:
+                    voice_name = voice_map[voice_id]["name"]
+                else:
+                    raise ValueError(f"新增音色 {voice_id} 缺少有效的 name")
+
+                voice_ids.add(voice_id)
+                voice_map[voice_id] = {"name": voice_name, "enabled": enabled}
+
+            voice_list = [
+                (voice_id, f"{voice['name']}({voice_id})")
+                for voice_id, voice in voice_map.items()
+                if voice["enabled"]
+            ]
+
+            if not voice_list:
+                raise ValueError("至少需要启用一个音色")
+
+            self.logger.info(
+                "已加载 %d 个内置音色，并从 %s 合并 %d 项配置，当前启用 %d 个音色",
+                len(BUILTIN_VOICES), config_path, len(voices), len(voice_list)
+            )
+            return voice_list
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(f"加载音色配置失败：{config_path}\n{exc}") from exc
+
     def create_voice_panel(self):
         """创建音色选择面板"""
         panel = wx.Panel(self, wx.ID_ANY, style=wx.TAB_TRAVERSAL)
         sizer = wx.StaticBoxSizer(wx.StaticBox(panel, wx.ID_ANY, "选择音色（可多选）"), wx.VERTICAL)
         
-        # 音色列表
-        self.voice_list = [
-            ("gdfanfp", "精品客服女声芳芳(gdfanfp)"),
-            ("gqlanfp", "精品温柔女声小兰(gqlanfp)"),
-            ("gdfanf_natong", "精品男童方方(gdfanf_natong)"),
-            ("xbekef", "精品女童贝壳(xbekef)"),
-            ("jlshimp", "精品男声季老师(jlshimp)"),
-            ("xijunma", "精品男声小军(xijunma)"),
-            ("xmguof", "精品甜美女声婷婷(xmguof)"),
-            ("lzliafv5", "臻品可爱男童连连(lzliafv5)")
-        ]
+        # 内置音色与可选的外部增量配置合并，新增音色无需修改或重新编译程序。
+        self.voice_list = self.load_voice_list()
+
+        # 音色搜索
+        search_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        search_sizer.Add(wx.StaticText(panel, wx.ID_ANY, "搜索音色："),
+                         0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.voice_search = wx.SearchCtrl(panel, wx.ID_ANY, style=wx.TE_PROCESS_ENTER)
+        self.voice_search.SetDescriptiveText("输入音色名称或 ID")
+        self.voice_search.ShowCancelButton(True)
+        search_sizer.Add(self.voice_search, 1, wx.EXPAND)
+        self.voice_config_help = wx.Button(
+            panel, wx.ID_ANY, "?", size=wx.Size(panel.FromDIP(30), -1)
+        )
+        self.voice_config_help.SetToolTip("查看新增、修改和停用音色的配置示例")
+        search_sizer.Add(self.voice_config_help, 0, wx.LEFT, 6)
+        sizer.Add(search_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
         
         # 操作按钮
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -569,22 +674,42 @@ class TTSFrame(wx.Frame):
         
         sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 5)
         
-        # 创建复选框列表
-        grid_sizer = wx.GridSizer(2, 4, 5, 15)
+        # 在固定高度的滚动区域内创建复选框列表。
+        self.voice_scroll_window = wx.ScrolledWindow(
+            panel, wx.ID_ANY, style=wx.VSCROLL | wx.TAB_TRAVERSAL
+        )
+        self.voice_scroll_window.SetScrollRate(0, 10)
+        self.voice_grid_sizer = wx.GridSizer(rows=0, cols=4, vgap=5, hgap=15)
         self.voice_checkboxes = []
         
         for voice_id, voice_desc in self.voice_list:
-            cb = wx.CheckBox(panel, wx.ID_ANY, voice_desc)
+            cb = wx.CheckBox(self.voice_scroll_window, wx.ID_ANY, voice_desc)
             cb.voice_id = voice_id  # 将voice_id存储在checkbox对象中
             cb.Bind(wx.EVT_CHECKBOX, self.update_selected_count)
-            grid_sizer.Add(cb, 0, wx.ALL, 3)
+            self.voice_grid_sizer.Add(cb, 0, wx.ALL, 3)
             self.voice_checkboxes.append(cb)
+
+        # 少量音色时按实际行数紧凑显示，音色较多时限制最大高度并滚动。
+        row_count = max(1, (len(self.voice_checkboxes) + 3) // 4)
+        checkbox_height = max(
+            (cb.GetBestSize().height for cb in self.voice_checkboxes),
+            default=panel.FromDIP(22)
+        )
+        row_height = checkbox_height + panel.FromDIP(11)
+        scroll_height = min(
+            panel.FromDIP(80),
+            row_count * row_height + panel.FromDIP(4)
+        )
+        self.voice_scroll_window.SetMinSize(wx.Size(-1, scroll_height))
+        self.voice_scroll_window.SetMaxSize(wx.Size(-1, scroll_height))
         
         # 默认选中第一个
         if self.voice_checkboxes:
             self.voice_checkboxes[0].SetValue(True)
         
-        sizer.Add(grid_sizer, 0, wx.EXPAND | wx.ALL, 5)
+        self.voice_scroll_window.SetSizer(self.voice_grid_sizer)
+        self.voice_scroll_window.FitInside()
+        sizer.Add(self.voice_scroll_window, 0, wx.EXPAND | wx.ALL, 5)
         
         panel.SetSizer(sizer)
         
@@ -592,6 +717,8 @@ class TTSFrame(wx.Frame):
         btn_select_all.Bind(wx.EVT_BUTTON, self.on_select_all)
         btn_select_none.Bind(wx.EVT_BUTTON, self.on_select_none)
         btn_invert.Bind(wx.EVT_BUTTON, self.on_invert_selection)
+        self.voice_search.Bind(wx.EVT_TEXT, self.on_voice_search)
+        self.voice_config_help.Bind(wx.EVT_BUTTON, self.on_voice_config_help)
         
         return panel
     
@@ -736,6 +863,70 @@ class TTSFrame(wx.Frame):
         # 更新选中音色计数
         self.update_selected_count()
     
+    def on_voice_config_help(self, event):
+        """显示外部音色配置文件的说明与示例。"""
+        if getattr(sys, "frozen", False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(app_dir, "voices.json")
+
+        help_text = (
+            f"配置文件位置：\n{config_path}\n\n"
+            "程序已内置常用音色。voices.json 是可选的增量配置，保存后重启程序生效。\n\n"
+            "配置示例：\n"
+            f"{VOICE_CONFIG_EXAMPLE}\n\n"
+            "说明：\n"
+            "1. 新 ID + name：新增音色。\n"
+            "2. 已有 ID + name：修改音色显示名称。\n"
+            "3. 已有 ID + enabled=false：停用音色。\n"
+            "4. enabled 省略时默认为 true。\n"
+            "5. JSON 不支持 // 注释，最后一项末尾不能有逗号。"
+        )
+
+        dialog = wx.Dialog(
+            self, wx.ID_ANY, "音色配置示例",
+            size=wx.Size(self.FromDIP(680), self.FromDIP(520)),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
+        )
+        dialog_sizer = wx.BoxSizer(wx.VERTICAL)
+        example_text = wx.TextCtrl(
+            dialog, wx.ID_ANY, help_text,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL
+        )
+        example_text.SetBackgroundColour(
+            wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE)
+        )
+        example_text.SetFont(wx.Font(
+            self.FromDIP(10), wx.FONTFAMILY_TELETYPE,
+            wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL
+        ))
+        dialog_sizer.Add(example_text, 1, wx.EXPAND | wx.ALL, self.FromDIP(10))
+        dialog_sizer.Add(
+            dialog.CreateSeparatedButtonSizer(wx.OK),
+            0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self.FromDIP(10)
+        )
+        dialog.SetSizer(dialog_sizer)
+        dialog.CentreOnParent()
+        dialog.ShowModal()
+        dialog.Destroy()
+
+    def on_voice_search(self, event):
+        """按音色名称或 ID 实时筛选音色。"""
+        keyword = self.voice_search.GetValue().strip().casefold()
+        self.voice_grid_sizer.Clear(delete_windows=False)
+
+        for cb in self.voice_checkboxes:
+            matched = not keyword or keyword in cb.GetLabel().casefold()
+            cb.Show(matched)
+            if matched:
+                self.voice_grid_sizer.Add(cb, 0, wx.ALL, 3)
+
+        self.voice_scroll_window.Layout()
+        self.voice_scroll_window.FitInside()
+        self.voice_scroll_window.Scroll(0, 0)
+        event.Skip()
+
     def on_select_all(self, event):
         """全选音色"""
         for cb in self.voice_checkboxes:
