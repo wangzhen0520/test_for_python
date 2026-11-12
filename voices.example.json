@@ -1,0 +1,7 @@
+{
+  "voices": [
+    { "id": "new_voice_id", "name": "新增音色名称" },
+    { "id": "xmguof", "name": "修改后的显示名称" },
+    { "id": "yezi1f_csh", "enabled": false }
+  ]
+}
