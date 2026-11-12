@@ -14,6 +14,8 @@ from threading import Thread
 import wx.lib.newevent
 import wx.grid
 import logging
+import shutil
+import subprocess
 from logging.handlers import RotatingFileHandler
 
 
@@ -71,10 +73,10 @@ BUILTIN_VOICES = (
     ("xijunma", "精品男声小军"),
     ("xmguof", "精品甜美女声婷婷"),
     ("lzliafv5", "臻品可爱男童连连"),
-    ("wqingf_csn", "精品四川话女声文卿"),
-    ("dayaof_csd", "精品山东话女声大瑶"),
-    ("hchunf_ctn", "精品粤语女声何春"),
-    ("yezi1f_csh", "精品上海话女声叶子"),
+    # ("wqingf_csn", "精品四川话女声文卿"),
+    # ("dayaof_csd", "精品山东话女声大瑶"),
+    # ("hchunf_ctn", "精品粤语女声何春"),
+    # ("yezi1f_csh", "精品上海话女声叶子"),
 )
 
 VOICE_CONFIG_EXAMPLE = """{
@@ -84,6 +86,79 @@ VOICE_CONFIG_EXAMPLE = """{
     { "id": "yezi1f_csh", "enabled": false }
   ]
 }"""
+
+SUPPORTED_SILENCE_FORMATS = ("mp3", "wav", "pcm", "wav.alaw", "opus")
+
+
+def get_app_dir():
+    """返回脚本或打包后 EXE 所在目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _ffmpeg_names():
+    return ("ffmpeg.exe", "ffmpeg") if os.name == "nt" else ("ffmpeg", "ffmpeg.exe")
+
+
+def _resolve_ffmpeg_candidate(path):
+    path = os.path.abspath(os.path.expandvars(os.path.expanduser(path)))
+    if os.path.isdir(path):
+        for name in _ffmpeg_names():
+            candidate = os.path.join(path, name)
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+    if os.path.isfile(path):
+        return path
+    return None
+
+
+def resolve_ffmpeg_path(configured_path=""):
+    """按配置、程序目录、工作目录、PATH 的顺序查找 FFmpeg。"""
+    configured_path = configured_path.strip()
+    if configured_path:
+        resolved = _resolve_ffmpeg_candidate(configured_path)
+        if resolved:
+            return resolved
+        raise ValueError(f"配置的 FFmpeg 路径无效：{configured_path}")
+
+    checked_dirs = []
+    for directory in (get_app_dir(), os.getcwd()):
+        normalized = os.path.normcase(os.path.abspath(directory))
+        if normalized in checked_dirs:
+            continue
+        checked_dirs.append(normalized)
+        resolved = _resolve_ffmpeg_candidate(directory)
+        if resolved:
+            return resolved
+
+    resolved = shutil.which("ffmpeg")
+    if resolved:
+        return os.path.abspath(resolved)
+    raise ValueError("未找到 FFmpeg。请配置 FFmpeg 路径、将其放到程序目录，或加入系统 PATH。")
+
+
+def validate_ffmpeg_executable(ffmpeg_path):
+    """确认目标文件能够作为 FFmpeg 正常启动。"""
+    creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, '-version'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=creation_flags,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"无法运行 FFmpeg：{ffmpeg_path}\n{exc}") from exc
+    if result.returncode != 0 or 'ffmpeg version' not in (result.stdout or '').lower():
+        detail = (result.stderr or result.stdout or "未返回版本信息").strip()
+        raise ValueError(f"指定文件不是可用的 FFmpeg：{ffmpeg_path}\n{detail[-500:]}")
 
 def hmac_sha1(key: bytes, message: bytes) -> str:
     """计算 HMAC-SHA1 签名"""
@@ -99,6 +174,7 @@ class TTSWorker(Thread):
         self.running = True
         self.create_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.logger = logging.getLogger(__name__)
+        self.last_error = ""
         
     def run(self):
         try:
@@ -153,15 +229,24 @@ class TTSWorker(Thread):
                     if not success:
                         wx.PostEvent(self.parent, TtsCompleteEvent(
                             success=False,
-                            message=f"处理失败: {filename} - {voice_id}"
+                            message=f"处理失败: {filename} - {voice_id}：{self.last_error or '未知错误'}"
                         ))
                         return
-                        
+
+            if not self.running:
+                wx.PostEvent(self.parent, TtsCompleteEvent(
+                    success=False,
+                    message="转换已停止"
+                ))
+                return
+
+            text_list_path = self.export_text_list(texts, output_dir)
             wx.PostEvent(self.parent, TtsCompleteEvent(
                 success=True,
                 message=f"全部完成！共处理 {processed} 个音频文件",
                 output_dir=output_dir,
-                create_time=self.create_time
+                create_time=self.create_time,
+                text_list_path=text_list_path
             ))
             
         except Exception as e:
@@ -169,6 +254,21 @@ class TTSWorker(Thread):
                 success=False,
                 message=f"发生错误: {str(e)}"
             ))
+
+    def export_text_list(self, texts, output_dir):
+        """将本批次表格内容按导入格式保存到时间目录。"""
+        time_dir = os.path.join(output_dir, self.create_time)
+        os.makedirs(time_dir, exist_ok=True)
+        text_list_path = os.path.join(time_dir, "合成文本.txt")
+        with open(text_list_path, "w", encoding="utf-8") as text_file:
+            for text_content, filename in texts:
+                filename = filename.strip()
+                if filename:
+                    text_file.write(f"{filename}|{text_content}\n")
+                else:
+                    text_file.write(f"{text_content}\n")
+        self.logger.info("已导出本批次文本：%s", text_list_path)
+        return text_list_path
     
     def reg_device(self):
         """注册设备"""
@@ -250,14 +350,105 @@ class TTSWorker(Thread):
             file_path = os.path.join(voice_dir, filename)
             with open(file_path, "wb") as f:
                 f.write(response.content)
+
+            if self.params.get('head_silence_ms', 0) or self.params.get('tail_silence_ms', 0):
+                self.append_silence(file_path)
             
             return True
         except Exception as e:
-            print(f"TTS请求失败: {e}")
+            self.last_error = str(e)
+            self.logger.exception("TTS请求或音频后处理失败")
             return False
+
+    def append_silence(self, file_path):
+        """通过临时文件为音频追加片头/片尾静音，失败时保留原文件。"""
+        audio_format = self.params.get('audio_format', 'mp3')
+        if audio_format not in SUPPORTED_SILENCE_FORMATS:
+            raise RuntimeError(f"不支持为 {audio_format} 格式追加静音")
+
+        ffmpeg_path = self.params.get('ffmpeg_executable')
+        if not ffmpeg_path:
+            raise RuntimeError("未配置可用的 FFmpeg")
+
+        head_ms = int(self.params.get('head_silence_ms', 0))
+        tail_ms = int(self.params.get('tail_silence_ms', 0))
+        sample_rate = int(self.params.get('sample_rate', 16000))
+        filters = []
+        if head_ms:
+            filters.append(f"adelay=delays={head_ms}:all=1")
+        if tail_ms:
+            filters.append(f"apad=pad_dur={tail_ms / 1000.0:.3f}")
+
+        temp_path = f"{file_path}.silence-{uuid.uuid4().hex}.tmp"
+        command = [ffmpeg_path, '-y', '-hide_banner', '-loglevel', 'error']
+        if audio_format == 'pcm':
+            command.extend(['-f', 's16le', '-ar', str(sample_rate), '-ac', '1'])
+        elif audio_format == 'wav.alaw':
+            command.extend(['-f', 'wav'])
+        command.extend(['-i', file_path, '-af', ','.join(filters), '-vn'])
+
+        output_args = {
+            'mp3': ['-c:a', 'libmp3lame', '-ar', str(sample_rate), '-ac', '1', '-f', 'mp3'],
+            'wav': ['-c:a', 'pcm_s16le', '-ar', str(sample_rate), '-ac', '1', '-f', 'wav'],
+            'pcm': ['-c:a', 'pcm_s16le', '-ar', str(sample_rate), '-ac', '1', '-f', 's16le'],
+            'wav.alaw': ['-c:a', 'pcm_alaw', '-ar', str(sample_rate), '-ac', '1', '-f', 'wav'],
+            'opus': ['-c:a', 'libopus', '-ar', str(sample_rate), '-ac', '1', '-f', 'opus'],
+        }
+        command.extend(output_args[audio_format])
+        command.append(temp_path)
+
+        creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                creationflags=creation_flags,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "FFmpeg 未返回错误详情").strip()
+                detail = detail[-1000:]
+                raise RuntimeError(f"FFmpeg 处理失败（退出码 {result.returncode}）：{detail}")
+            if not os.path.isfile(temp_path) or os.path.getsize(temp_path) == 0:
+                raise RuntimeError("FFmpeg 未生成有效的输出文件")
+            os.replace(temp_path, file_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    self.logger.warning("无法清理临时文件：%s", temp_path)
     
     def stop(self):
         self.running = False
+
+class PlaceholderCellRenderer(wx.grid.GridCellStringRenderer):
+    """为空单元格绘制提示文字，但不写入表格数据。"""
+    def __init__(self, placeholder):
+        super().__init__()
+        self.placeholder = placeholder
+
+    def Clone(self):
+        return PlaceholderCellRenderer(self.placeholder)
+
+    def Draw(self, grid, attr, dc, rect, row, col, is_selected):
+        super().Draw(grid, attr, dc, rect, row, col, is_selected)
+        if grid.GetCellValue(row, col):
+            return
+        if grid.IsCellEditControlShown() and grid.GetGridCursorRow() == row and grid.GetGridCursorCol() == col:
+            return
+
+        dc.SetFont(attr.GetFont())
+        dc.SetTextForeground(wx.Colour(150, 150, 150))
+        dc.SetClippingRegion(rect)
+        text_height = dc.GetTextExtent(self.placeholder)[1]
+        dc.DrawText(self.placeholder, rect.x + 4, rect.y + max(1, (rect.height - text_height) // 2))
+        dc.DestroyClippingRegion()
+
 
 class TextGrid(wx.grid.Grid):
     """文本输入表格"""
@@ -281,10 +472,6 @@ class TextGrid(wx.grid.Grid):
         self.default_rows = 10
         self.current_rows = 10
         
-        # 设置默认值提示
-        self.SetCellValue(0, 0, "欢迎使用语音助手")
-        self.SetCellValue(0, 1, "欢迎语")
-        
         # 设置字体
         font = wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, False)
         self.SetDefaultCellFont(font)
@@ -294,6 +481,47 @@ class TextGrid(wx.grid.Grid):
         
         # 绑定事件
         self.Bind(wx.grid.EVT_GRID_CELL_CHANGED, self.on_cell_changed)
+        self.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
+        self.apply_placeholders()
+
+    def apply_placeholders(self):
+        """仅在首行绘制提示，表格实际值保持为空。"""
+        if self.GetNumberRows() > 0:
+            self.SetCellRenderer(0, 0, PlaceholderCellRenderer("欢迎使用语音助手"))
+            self.SetCellRenderer(0, 1, PlaceholderCellRenderer("欢迎语"))
+            self.ForceRefresh()
+
+    def delete_selected_rows(self):
+        """删除选中行；没有整行选择时删除光标所在行。"""
+        row_count = self.GetNumberRows()
+        if row_count <= 0:
+            self.AppendRows(1)
+            row_count = 1
+
+        rows = sorted(set(self.GetSelectedRows()), reverse=True)
+        if not rows:
+            cursor_row = self.GetGridCursorRow()
+            if 0 <= cursor_row < row_count:
+                rows = [cursor_row]
+
+        for row in rows:
+            if 0 <= row < self.GetNumberRows():
+                self.DeleteRows(row, 1)
+
+        if self.GetNumberRows() == 0:
+            self.AppendRows(1)
+        self.current_rows = self.GetNumberRows()
+        target_row = min(rows[-1] if rows else 0, self.current_rows - 1)
+        self.ClearSelection()
+        self.SetGridCursor(target_row, 0)
+        self.apply_placeholders()
+        return len(rows)
+
+    def on_key_down(self, event):
+        if event.GetKeyCode() == wx.WXK_DELETE and not self.IsCellEditControlShown():
+            self.delete_selected_rows()
+            return
+        event.Skip()
     
     def on_cell_changed(self, event):
         """单元格内容变化事件"""
@@ -301,9 +529,10 @@ class TextGrid(wx.grid.Grid):
         col = event.GetCol()
         
         # 如果是最后一行有内容，添加新行
+        self.current_rows = self.GetNumberRows()
         if row == self.current_rows - 1 and self.GetCellValue(row, 0).strip():
             self.AppendRows(1)
-            self.current_rows += 1
+            self.current_rows = self.GetNumberRows()
             
             # 滚动到最后一行（使用GoToCell方法）
             wx.CallAfter(self.GoToCell, row + 1, 0)
@@ -384,8 +613,8 @@ class ConfigDialog(wx.Dialog):
 class SynthesisParamDialog(wx.Dialog):
     """合成参数对话框"""
     def __init__(self, parent):
-        wx.Dialog.__init__(self, parent, id=wx.ID_ANY, title="合成参数配置", 
-                          pos=wx.DefaultPosition, size=wx.Size(400, 340))
+        wx.Dialog.__init__(self, parent, id=wx.ID_ANY, title="合成参数配置",
+                          pos=wx.DefaultPosition, size=wx.Size(650, 500))
         
         self.parent = parent
         self.init_ui()
@@ -398,13 +627,16 @@ class SynthesisParamDialog(wx.Dialog):
         # 创建参数面板
         param_sizer = wx.StaticBoxSizer(wx.StaticBox(self, wx.ID_ANY, "合成参数"), wx.VERTICAL)
         
-        grid_sizer = wx.FlexGridSizer(4, 2, 10, 15)
+        grid_sizer = wx.FlexGridSizer(7, 2, 10, 15)
         grid_sizer.AddGrowableCol(1)
         
         # 语速
         grid_sizer.Add(wx.StaticText(self, wx.ID_ANY, "语速(0.5-2.0):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
         self.speed = wx.TextCtrl(self, wx.ID_ANY, "1.0", wx.DefaultPosition, wx.Size(100, -1), 0)
-        grid_sizer.Add(self.speed, 0, wx.ALL, 5)
+        speed_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        speed_sizer.Add(self.speed, 0, wx.RIGHT, 8)
+        speed_sizer.Add(wx.StaticText(self, wx.ID_ANY, "越小越快"), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid_sizer.Add(speed_sizer, 0, wx.ALL, 5)
         
         # 音量
         grid_sizer.Add(wx.StaticText(self, wx.ID_ANY, "音量(0-100):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
@@ -422,6 +654,28 @@ class SynthesisParamDialog(wx.Dialog):
         self.audio_format = wx.ComboBox(self, wx.ID_ANY, "mp3", choices=["mp3", "wav", "pcm", "wav.alaw", "opus"], 
                                        style=wx.CB_READONLY, size=(100, -1))
         grid_sizer.Add(self.audio_format, 0, wx.ALL, 5)
+
+        grid_sizer.Add(wx.StaticText(self, wx.ID_ANY, "片头静音(毫秒):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        self.head_silence_ms = wx.TextCtrl(self, wx.ID_ANY, "0", size=(100, -1))
+        head_silence_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        head_silence_sizer.Add(self.head_silence_ms, 0, wx.RIGHT, 8)
+        head_silence_sizer.Add(wx.StaticText(self, wx.ID_ANY, "0 表示默认不追加"), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid_sizer.Add(head_silence_sizer, 0, wx.ALL, 5)
+
+        grid_sizer.Add(wx.StaticText(self, wx.ID_ANY, "片尾静音(毫秒):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        self.tail_silence_ms = wx.TextCtrl(self, wx.ID_ANY, "0", size=(100, -1))
+        tail_silence_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        tail_silence_sizer.Add(self.tail_silence_ms, 0, wx.RIGHT, 8)
+        tail_silence_sizer.Add(wx.StaticText(self, wx.ID_ANY, "0 表示默认不追加"), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid_sizer.Add(tail_silence_sizer, 0, wx.ALL, 5)
+
+        grid_sizer.Add(wx.StaticText(self, wx.ID_ANY, "FFmpeg路径:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        ffmpeg_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.ffmpeg_path = wx.TextCtrl(self, wx.ID_ANY, "", size=(300, -1))
+        btn_ffmpeg_dir = wx.Button(self, wx.ID_ANY, "选择目录...")
+        ffmpeg_sizer.Add(self.ffmpeg_path, 1, wx.RIGHT, 5)
+        ffmpeg_sizer.Add(btn_ffmpeg_dir, 0)
+        grid_sizer.Add(ffmpeg_sizer, 1, wx.EXPAND | wx.ALL, 5)
         
         param_sizer.Add(grid_sizer, 1, wx.EXPAND | wx.ALL, 5)
         sizer.Add(param_sizer, 1, wx.EXPAND | wx.ALL, 10)
@@ -429,7 +683,7 @@ class SynthesisParamDialog(wx.Dialog):
         # 提示信息
         hint_sizer = wx.BoxSizer(wx.HORIZONTAL)
         hint_text = wx.StaticText(self, wx.ID_ANY, 
-                                 "提示：语速范围为0.5-2.0，音量范围为0-100")
+                                 "提示：静音填非负整数毫秒；FFmpeg 路径留空时自动查找。")
         hint_text.SetForegroundColour(wx.Colour(128, 128, 128))
         hint_sizer.Add(hint_text, 0, wx.ALL, 5)
         sizer.Add(hint_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -441,6 +695,9 @@ class SynthesisParamDialog(wx.Dialog):
         btn_sizer.AddButton(btn_ok)
         btn_sizer.AddButton(btn_cancel)
         btn_sizer.Realize()
+
+        btn_ok.Bind(wx.EVT_BUTTON, self.on_ok)
+        btn_ffmpeg_dir.Bind(wx.EVT_BUTTON, self.on_browse_ffmpeg_dir)
         
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
         
@@ -454,6 +711,27 @@ class SynthesisParamDialog(wx.Dialog):
         self.volume.SetValue(self.parent.volume.GetValue())
         self.sample_rate.SetValue(self.parent.sample_rate.GetValue())
         self.audio_format.SetValue(self.parent.audio_format.GetValue())
+        self.head_silence_ms.SetValue(self.parent.head_silence_ms.GetValue())
+        self.tail_silence_ms.SetValue(self.parent.tail_silence_ms.GetValue())
+        self.ffmpeg_path.SetValue(self.parent.ffmpeg_path.GetValue())
+
+    def on_ok(self, event):
+        for label, control in (("片头静音", self.head_silence_ms), ("片尾静音", self.tail_silence_ms)):
+            try:
+                value = int(control.GetValue().strip())
+                if value < 0:
+                    raise ValueError
+            except ValueError:
+                wx.MessageBox(f"{label}必须是非负整数毫秒！", "错误", wx.OK | wx.ICON_ERROR, self)
+                control.SetFocus()
+                return
+        self.EndModal(wx.ID_OK)
+
+    def on_browse_ffmpeg_dir(self, event):
+        dlg = wx.DirDialog(self, "选择 FFmpeg 所在目录", style=wx.DD_DEFAULT_STYLE)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.ffmpeg_path.SetValue(dlg.GetPath())
+        dlg.Destroy()
     
     def get_config(self):
         """获取配置"""
@@ -461,7 +739,10 @@ class SynthesisParamDialog(wx.Dialog):
             'speed': self.speed.GetValue(),
             'volume': self.volume.GetValue(),
             'sample_rate': self.sample_rate.GetValue(),
-            'audio_format': self.audio_format.GetValue()
+            'audio_format': self.audio_format.GetValue(),
+            'head_silence_ms': self.head_silence_ms.GetValue().strip(),
+            'tail_silence_ms': self.tail_silence_ms.GetValue().strip(),
+            'ffmpeg_path': self.ffmpeg_path.GetValue().strip()
         }
 
 class TTSFrame(wx.Frame):
@@ -739,11 +1020,13 @@ class TTSFrame(wx.Frame):
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         btn_add = wx.Button(panel, wx.ID_ANY, "添加行", wx.DefaultPosition, wx.DefaultSize, 0)
+        btn_delete = wx.Button(panel, wx.ID_ANY, "删除选中行", wx.DefaultPosition, wx.DefaultSize, 0)
         btn_clear = wx.Button(panel, wx.ID_ANY, "清空表格", wx.DefaultPosition, wx.DefaultSize, 0)
         btn_load = wx.Button(panel, wx.ID_ANY, "导入文本", wx.DefaultPosition, wx.DefaultSize, 0)
         btn_export = wx.Button(panel, wx.ID_ANY, "导出表格", wx.DefaultPosition, wx.DefaultSize, 0)
         
         btn_sizer.Add(btn_add, 0, wx.ALL, 3)
+        btn_sizer.Add(btn_delete, 0, wx.ALL, 3)
         btn_sizer.Add(btn_clear, 0, wx.ALL, 3)
         btn_sizer.Add(btn_load, 0, wx.ALL, 3)
         btn_sizer.Add(btn_export, 0, wx.ALL, 3)
@@ -760,6 +1043,7 @@ class TTSFrame(wx.Frame):
         
         # 绑定事件
         btn_add.Bind(wx.EVT_BUTTON, self.on_add_row)
+        btn_delete.Bind(wx.EVT_BUTTON, self.on_delete_rows)
         btn_clear.Bind(wx.EVT_BUTTON, self.on_clear_grid)
         btn_load.Bind(wx.EVT_BUTTON, self.on_load_text)
         btn_export.Bind(wx.EVT_BUTTON, self.on_export_grid)
@@ -829,28 +1113,35 @@ class TTSFrame(wx.Frame):
     
     def load_default_config(self):
         """加载默认配置"""
-        # API配置控件
-        self.product_id = wx.TextCtrl(self, wx.ID_ANY, "279630209", style=wx.TE_READONLY)
-        self.product_key = wx.TextCtrl(self, wx.ID_ANY, "085757baadb96edbffcdc2f09ab68ab7", style=wx.TE_READONLY)
-        self.product_secret = wx.TextCtrl(self, wx.ID_ANY, "ef59258308d5691c39e07626e0e7a983", style=wx.TE_READONLY)
-        self.device_name = wx.TextCtrl(self, wx.ID_ANY, "1C:79:2D:2F:B2:98", style=wx.TE_READONLY)
-        
-        # 合成参数控件（隐藏，仅用于存储值）
-        self.speed = wx.TextCtrl(self, wx.ID_ANY, "1.0", style=wx.TE_READONLY)
-        self.volume = wx.TextCtrl(self, wx.ID_ANY, "100", style=wx.TE_READONLY)
-        self.sample_rate = wx.ComboBox(self, wx.ID_ANY, "16000", choices=["8000", "11025", "16000", "22050", "24000", "32000", "44100", "48000"], 
-                                      style=wx.CB_READONLY)
-        self.audio_format = wx.ComboBox(self, wx.ID_ANY, "mp3", choices=["mp3", "wav", "pcm", "wav.alaw", "opus"], style=wx.CB_READONLY)
-        
-        # 隐藏这些控件
-        self.product_id.Hide()
-        self.product_key.Hide()
-        self.product_secret.Hide()
-        self.device_name.Hide()
-        self.speed.Hide()
-        self.volume.Hide()
-        self.sample_rate.Hide()
-        self.audio_format.Hide()
+        defaults = {
+            'product_id': "279630209",
+            'product_key': "085757baadb96edbffcdc2f09ab68ab7",
+            'product_secret': "ef59258308d5691c39e07626e0e7a983",
+            'device_name': "1C:79:2D:2F:B2:98",
+            'speed': "1.0",
+            'volume': "100",
+            'head_silence_ms': "0",
+            'tail_silence_ms': "0",
+            'ffmpeg_path': "",
+        }
+        if hasattr(self, 'product_id'):
+            for name, value in defaults.items():
+                getattr(self, name).SetValue(value)
+            self.sample_rate.SetValue("16000")
+            self.audio_format.SetValue("mp3")
+        else:
+            for name, value in defaults.items():
+                control = wx.TextCtrl(self, wx.ID_ANY, value, style=wx.TE_READONLY)
+                setattr(self, name, control)
+                control.Hide()
+            self.sample_rate = wx.ComboBox(
+                self, wx.ID_ANY, "16000",
+                choices=["8000", "11025", "16000", "22050", "24000", "32000", "44100", "48000"],
+                style=wx.CB_READONLY)
+            self.audio_format = wx.ComboBox(
+                self, wx.ID_ANY, "mp3", choices=list(SUPPORTED_SILENCE_FORMATS), style=wx.CB_READONLY)
+            self.sample_rate.Hide()
+            self.audio_format.Hide()
         
         # API URL（固定值）
         self.api_reg_url = "https://auth.dui.ai/auth/device/register"
@@ -981,6 +1272,9 @@ class TTSFrame(wx.Frame):
             self.volume.SetValue(config['volume'])
             self.sample_rate.SetValue(config['sample_rate'])
             self.audio_format.SetValue(config['audio_format'])
+            self.head_silence_ms.SetValue(config['head_silence_ms'])
+            self.tail_silence_ms.SetValue(config['tail_silence_ms'])
+            self.ffmpeg_path.SetValue(config['ffmpeg_path'])
             
             self.add_log("合成参数已更新")
         
@@ -1003,6 +1297,9 @@ class TTSFrame(wx.Frame):
                     'volume': self.volume.GetValue(),
                     'sample_rate': self.sample_rate.GetValue(),
                     'audio_format': self.audio_format.GetValue(),
+                    'head_silence_ms': self.head_silence_ms.GetValue(),
+                    'tail_silence_ms': self.tail_silence_ms.GetValue(),
+                    'ffmpeg_path': self.ffmpeg_path.GetValue(),
                     'output_dir': self.output_dir.GetValue(),
                     'voices': [cb.voice_id for cb in self.voice_checkboxes if cb.GetValue()]
                 }
@@ -1046,6 +1343,12 @@ class TTSFrame(wx.Frame):
                     self.sample_rate.SetValue(config['sample_rate'])
                 if 'audio_format' in config:
                     self.audio_format.SetValue(config['audio_format'])
+                if 'head_silence_ms' in config:
+                    self.head_silence_ms.SetValue(str(config['head_silence_ms']))
+                if 'tail_silence_ms' in config:
+                    self.tail_silence_ms.SetValue(str(config['tail_silence_ms']))
+                if 'ffmpeg_path' in config:
+                    self.ffmpeg_path.SetValue(str(config['ffmpeg_path']))
                 if 'output_dir' in config:
                     self.output_dir.SetValue(config['output_dir'])
                 
@@ -1186,9 +1489,16 @@ class TTSFrame(wx.Frame):
     def on_add_row(self, event):
         """添加行"""
         self.text_grid.AppendRows(1)
+        self.text_grid.current_rows = self.text_grid.GetNumberRows()
         # 滚动到最后一行
         rows = self.text_grid.GetNumberRows()
         wx.CallAfter(self.text_grid.GoToCell, rows - 1, 0)
+
+    def on_delete_rows(self, event):
+        """删除表格中选中的整行。"""
+        count = self.text_grid.delete_selected_rows()
+        if count:
+            self.add_log(f"已删除 {count} 行")
     
     def reset_table(self):
         """重置表格为初始状态（10行）"""
@@ -1206,9 +1516,7 @@ class TTSFrame(wx.Frame):
         if hasattr(self.text_grid, 'current_rows'):
             self.text_grid.current_rows = 10
         
-        # 设置默认值
-        self.text_grid.SetCellValue(0, 0, "欢迎使用语音助手")
-        self.text_grid.SetCellValue(0, 1, "欢迎语")
+        self.text_grid.apply_placeholders()
         
         # 滚动到第一行
         wx.CallAfter(self.text_grid.GoToCell, 0, 0)
@@ -1341,6 +1649,12 @@ class TTSFrame(wx.Frame):
         self.add_log(f"开始转换时间: {current_time}")
         self.add_log(f"共 {len(texts)} 个文本 × {len(params['voice_ids'])} 个音色 = {total_tasks} 个文件")
         self.add_log(f"输出目录结构: {self.output_dir.GetValue()}/时间目录/音色目录/音频文件")
+        if params['head_silence_ms'] or params['tail_silence_ms']:
+            self.add_log(
+                f"FFmpeg 静音处理: 片头 {params['head_silence_ms']} ms，"
+                f"片尾 {params['tail_silence_ms']} ms"
+            )
+            self.add_log(f"FFmpeg: {params['ffmpeg_executable']}")
         
         # 启动工作线程
         self.worker = TTSWorker(self, params)
@@ -1387,6 +1701,8 @@ class TTSFrame(wx.Frame):
             if hasattr(event, 'output_dir') and hasattr(event, 'create_time'):
                 output_path = os.path.join(event.output_dir, event.create_time)
                 self.add_log(f"✓ 文件保存在: {output_path}")
+                if hasattr(event, 'text_list_path'):
+                    self.add_log(f"✓ 表格内容已导出: {event.text_list_path}")
                 # 打开输出目录
                 if wx.MessageBox(f"转换完成！文件保存在：{output_path}\n\n是否打开输出目录？", 
                                "完成", wx.YES_NO | wx.ICON_INFORMATION) == wx.YES:
@@ -1437,6 +1753,30 @@ class TTSFrame(wx.Frame):
         except:
             wx.MessageBox("音量必须是整数！", "错误", wx.OK | wx.ICON_ERROR)
             return False
+
+        silence_values = []
+        for label, control in (("片头静音", self.head_silence_ms), ("片尾静音", self.tail_silence_ms)):
+            try:
+                value = int(control.GetValue().strip())
+                if value < 0:
+                    raise ValueError
+                silence_values.append(value)
+            except ValueError:
+                wx.MessageBox(f"{label}必须是非负整数毫秒！", "错误", wx.OK | wx.ICON_ERROR)
+                return False
+
+        self.ffmpeg_executable = ""
+        if any(silence_values):
+            if self.audio_format.GetValue() not in SUPPORTED_SILENCE_FORMATS:
+                wx.MessageBox(f"当前音频格式不支持追加静音：{self.audio_format.GetValue()}",
+                              "错误", wx.OK | wx.ICON_ERROR)
+                return False
+            try:
+                self.ffmpeg_executable = resolve_ffmpeg_path(self.ffmpeg_path.GetValue())
+                validate_ffmpeg_executable(self.ffmpeg_executable)
+            except ValueError as exc:
+                wx.MessageBox(str(exc), "FFmpeg 配置错误", wx.OK | wx.ICON_ERROR)
+                return False
         
         return True
     
@@ -1458,6 +1798,10 @@ class TTSFrame(wx.Frame):
             'volume': self.volume.GetValue(),
             'sample_rate': self.sample_rate.GetValue(),
             'audio_format': self.audio_format.GetValue(),
+            'head_silence_ms': int(self.head_silence_ms.GetValue()),
+            'tail_silence_ms': int(self.tail_silence_ms.GetValue()),
+            'ffmpeg_path': self.ffmpeg_path.GetValue(),
+            'ffmpeg_executable': getattr(self, 'ffmpeg_executable', ''),
             'api_reg_url': self.api_reg_url,
             'api_tts_url': self.api_tts_url,
             'output_dir': self.output_dir.GetValue()
